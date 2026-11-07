@@ -1,0 +1,2 @@
+# ClaTrader
+Trading con Claude
