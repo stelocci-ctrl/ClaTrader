@@ -1,7 +1,7 @@
 from decimal import Decimal
 
 from clatrader.backtest import run
-from clatrader.indicators import atr, ema, rsi
+from clatrader.indicators import atr, ema, rsi, sma
 from clatrader.risk import InstrumentRules, position_size, round_to_tick
 from clatrader.strategy import Candle, StrategyParams, evaluate
 
@@ -39,18 +39,55 @@ def test_round_to_tick():
     assert round_to_tick(123.456, Decimal("0.1")) == Decimal("123.5")
 
 
-def _series(prices):
-    return [Candle(i * 60_000, p, p * 1.002, p * 0.998, p, 1.0) for i, p in enumerate(prices)]
+def _series(prices, last_volume=1.0):
+    n = len(prices)
+    return [
+        Candle(i * 60_000, p, p * 1.002, p * 0.998, p, last_volume if i == n - 1 else 1.0)
+        for i, p in enumerate(prices)
+    ]
+
+
+def test_sma():
+    assert sma([1.0, 2.0, 3.0, 4.0], 2) == [None, 1.5, 2.5, 3.5]
+
+
+PARAMS = StrategyParams(ema_fast=3, ema_slow=6, ema_trend=20, rsi_period=5, atr_period=5, rsi_long_max=101)
+
+
+def _first_cross(last_volume, params=PARAMS):
+    prices = [100 + i for i in range(40)] + [138, 136, 134, 133]
+    for extra in range(1, 10):
+        series = prices + [133 + 3 * k for k in range(1, extra + 1)]
+        sig = evaluate("BTCUSDT", _series(series, last_volume), params)
+        if sig or evaluate("BTCUSDT", _series(series, 100.0), params):
+            return sig
+    return None
+
+
+def test_volume_filter_rejects_low_volume():
+    assert _first_cross(last_volume=1.0) is None  # volume pari alla media: scartato
+
+
+def test_volume_filter_accepts_high_volume():
+    sig = _first_cross(last_volume=2.0)
+    assert sig is not None and sig.side == "Buy"
+    assert abs(sig.indicators["rel_volume"] - 2.0) < 1e-9
+
+
+def test_volume_filter_disabled():
+    from dataclasses import replace
+
+    assert _first_cross(last_volume=1.0, params=replace(PARAMS, volume_mult=0)) is not None
 
 
 def test_long_signal_on_crossover_in_uptrend():
-    p = StrategyParams(ema_fast=3, ema_slow=6, ema_trend=20, rsi_period=5, atr_period=5, rsi_long_max=101)
+    p = PARAMS
     prices = [100 + i for i in range(40)] + [138, 136, 134, 133]
     candles = _series(prices)
     # cerca una candela successiva in cui la EMA veloce rincrocia sopra
     sig = None
     for extra in range(1, 10):
-        sig = evaluate("BTCUSDT", _series(prices + [133 + 3 * k for k in range(1, extra + 1)]), p)
+        sig = evaluate("BTCUSDT", _series(prices + [133 + 3 * k for k in range(1, extra + 1)], 5.0), p)
         if sig:
             break
     assert evaluate("BTCUSDT", candles, p) is None

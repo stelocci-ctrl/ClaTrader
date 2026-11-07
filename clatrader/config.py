@@ -46,6 +46,8 @@ class Config:
     atr_period: int
     atr_sl_mult: float
     reward_risk: float
+    volume_period: int
+    volume_mult: float
 
     # Rischio / esecuzione
     risk_per_trade_pct: float
@@ -83,6 +85,8 @@ class Config:
             atr_period=int(os.getenv("ATR_PERIOD", "14")),
             atr_sl_mult=float(os.getenv("ATR_SL_MULT", "1.5")),
             reward_risk=float(os.getenv("REWARD_RISK", "2.0")),
+            volume_period=int(os.getenv("VOLUME_PERIOD", "20")),
+            volume_mult=float(os.getenv("VOLUME_MULT", "1.5")),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             max_position_usdt=float(os.getenv("MAX_POSITION_USDT", "1000")),
             approval_timeout_sec=int(os.getenv("APPROVAL_TIMEOUT_SEC", "300")),

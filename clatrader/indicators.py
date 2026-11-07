@@ -4,6 +4,19 @@ from __future__ import annotations
 from typing import Sequence
 
 
+def sma(values: Sequence[float], period: int) -> list[float | None]:
+    """Media mobile semplice."""
+    out: list[float | None] = [None] * len(values)
+    if period <= 0 or len(values) < period:
+        return out
+    window = sum(values[:period])
+    out[period - 1] = window / period
+    for i in range(period, len(values)):
+        window += values[i] - values[i - period]
+        out[i] = window / period
+    return out
+
+
 def ema(values: Sequence[float], period: int) -> list[float | None]:
     """EMA inizializzata con la SMA dei primi `period` valori."""
     out: list[float | None] = [None] * len(values)

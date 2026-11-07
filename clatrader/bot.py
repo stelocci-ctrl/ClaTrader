@@ -52,6 +52,8 @@ class ClaTrader:
             atr_period=cfg.atr_period,
             atr_sl_mult=cfg.atr_sl_mult,
             reward_risk=cfg.reward_risk,
+            volume_period=cfg.volume_period,
+            volume_mult=cfg.volume_mult,
         )
         self.pending: dict[str, PendingTrade] = {}
         self.last_signal_candle: dict[str, int] = {}
@@ -147,7 +149,7 @@ class ClaTrader:
             f"Quantità: <code>{qty}</code> (≈ {notional:.2f} USDT)\n"
             f"Rischio: <b>{risk:.2f} USDT</b> ({risk / equity * 100:.2f}% equity) · "
             f"Target: {reward:.2f} USDT\n"
-            f"RSI {ind['rsi']:.1f} · ATR {ind['atr']:.6g} · TF {self.cfg.interval} · candela {candle_t}\n\n"
+            f"RSI {ind['rsi']:.1f} · ATR {ind['atr']:.6g} · Vol {ind['rel_volume']:.1f}× media · TF {self.cfg.interval} · candela {candle_t}\n\n"
             f"⏳ Scade tra {self.cfg.approval_timeout_sec // 60} min."
         )
         kb = InlineKeyboardMarkup(
@@ -241,7 +243,7 @@ class ClaTrader:
             f"🤖 <b>ClaTrader</b> attivo [{self._mode_label()}]\n"
             f"Simboli: {', '.join(self.cfg.symbols)} · TF {self.cfg.interval} · {self.cfg.category}\n"
             f"Strategia: EMA {self.cfg.ema_fast}/{self.cfg.ema_slow} + trend EMA {self.cfg.ema_trend}, "
-            f"RSI {self.cfg.rsi_period}, SL {self.cfg.atr_sl_mult}×ATR, R:R {self.cfg.reward_risk}\n"
+            f"RSI {self.cfg.rsi_period}, volume ≥ {self.cfg.volume_mult}× media {self.cfg.volume_period}, SL {self.cfg.atr_sl_mult}×ATR, R:R {self.cfg.reward_risk}\n"
             f"Rischio per trade: {self.cfg.risk_per_trade_pct}%\n\n"
             "/status /balance /positions /pause /resume /scan"
         )

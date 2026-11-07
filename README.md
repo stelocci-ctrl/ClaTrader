@@ -20,15 +20,21 @@ qualsiasi operazione. Nessun ordine parte senza il tuo ✅.
 
 Solo la chat indicata in `TELEGRAM_CHAT_ID` può dare comandi o autorizzare.
 
-## Strategia (EMA crossover + filtro trend + RSI + ATR)
+## Strategia (EMA crossover + filtro trend + RSI + volume + ATR)
 
 | | Long | Short |
 |---|---|---|
 | Trigger | EMA 9 incrocia **sopra** EMA 21 | EMA 9 incrocia **sotto** EMA 21 |
 | Filtro trend | prezzo > EMA 200 | prezzo < EMA 200 |
 | Filtro RSI(14) | RSI < 70 | RSI > 30 |
+| Filtro volume | volume ≥ 1,5 × media 20 candele | volume ≥ 1,5 × media 20 candele |
 | Stop loss | entry − 1,5 × ATR(14) | entry + 1,5 × ATR(14) |
 | Take profit | entry + 2 × distanza stop | entry − 2 × distanza stop |
+
+Il **filtro volumetrico** scarta gli incroci avvenuti con poca partecipazione del mercato
+(spesso falsi segnali in fasi laterali): la candela del segnale deve avere un volume almeno
+`VOLUME_MULT` volte la media delle `VOLUME_PERIOD` candele precedenti. `VOLUME_MULT=0` lo disattiva.
+Il volume relativo è riportato nel messaggio Telegram.
 
 **Dimensionamento**: la quantità è tale che, se scatta lo stop, perdi `RISK_PER_TRADE_PCT`%
 dell'equity (default 1%), con un tetto di `MAX_POSITION_USDT` e di equity × leva.
