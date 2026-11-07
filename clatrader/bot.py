@@ -23,7 +23,7 @@ from telegram.ext import (
 from .config import Config
 from .exchange import BybitClient
 from .risk import position_size
-from .strategy import Signal, StrategyParams, evaluate
+from .strategy import Signal, describe, evaluate
 
 log = logging.getLogger("clatrader")
 
@@ -42,19 +42,7 @@ class ClaTrader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.client = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret, cfg.bybit_testnet, cfg.category)
-        self.params = StrategyParams(
-            ema_fast=cfg.ema_fast,
-            ema_slow=cfg.ema_slow,
-            ema_trend=cfg.ema_trend,
-            rsi_period=cfg.rsi_period,
-            rsi_long_max=cfg.rsi_long_max,
-            rsi_short_min=cfg.rsi_short_min,
-            atr_period=cfg.atr_period,
-            atr_sl_mult=cfg.atr_sl_mult,
-            reward_risk=cfg.reward_risk,
-            volume_period=cfg.volume_period,
-            volume_mult=cfg.volume_mult,
-        )
+        self.params = cfg.strategy
         self.pending: dict[str, PendingTrade] = {}
         self.last_signal_candle: dict[str, int] = {}
         self.paused = False
@@ -242,8 +230,7 @@ class ClaTrader:
         await update.effective_message.reply_html(
             f"🤖 <b>ClaTrader</b> attivo [{self._mode_label()}]\n"
             f"Simboli: {', '.join(self.cfg.symbols)} · TF {self.cfg.interval} · {self.cfg.category}\n"
-            f"Strategia: EMA {self.cfg.ema_fast}/{self.cfg.ema_slow} + trend EMA {self.cfg.ema_trend}, "
-            f"RSI {self.cfg.rsi_period}, volume ≥ {self.cfg.volume_mult}× media {self.cfg.volume_period}, SL {self.cfg.atr_sl_mult}×ATR, R:R {self.cfg.reward_risk}\n"
+            f"Strategia: {describe(self.params)}\n"
             f"Rischio per trade: {self.cfg.risk_per_trade_pct}%\n\n"
             "/status /balance /positions /pause /resume /scan"
         )

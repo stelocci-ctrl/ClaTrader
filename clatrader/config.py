@@ -6,6 +6,8 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from .strategy import StrategyParams
+
 
 def _bool(name: str, default: bool) -> bool:
     val = os.getenv(name)
@@ -19,6 +21,39 @@ def _required(name: str) -> str:
     if not val:
         raise RuntimeError(f"Variabile d'ambiente mancante: {name}")
     return val
+
+
+def category_from_env() -> str:
+    category = os.getenv("BYBIT_CATEGORY", "linear").strip().lower()
+    if category not in {"linear", "spot"}:
+        raise RuntimeError("BYBIT_CATEGORY deve essere 'linear' o 'spot'")
+    return category
+
+
+def symbols_from_env() -> tuple[str, ...]:
+    return tuple(s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT").split(",") if s.strip())
+
+
+def strategy_params_from_env() -> StrategyParams:
+    """Parametri della strategia dal .env (valori mancanti = default di StrategyParams).
+
+    Non richiede le chiavi API: usato sia dal bot sia dal backtest.
+    """
+    load_dotenv()
+    d = StrategyParams()
+    return StrategyParams(
+        ema_fast=int(os.getenv("EMA_FAST", d.ema_fast)),
+        ema_slow=int(os.getenv("EMA_SLOW", d.ema_slow)),
+        ema_trend=int(os.getenv("EMA_TREND", d.ema_trend)),
+        rsi_period=int(os.getenv("RSI_PERIOD", d.rsi_period)),
+        rsi_long_max=float(os.getenv("RSI_LONG_MAX", d.rsi_long_max)),
+        rsi_short_min=float(os.getenv("RSI_SHORT_MIN", d.rsi_short_min)),
+        atr_period=int(os.getenv("ATR_PERIOD", d.atr_period)),
+        atr_sl_mult=float(os.getenv("ATR_SL_MULT", d.atr_sl_mult)),
+        reward_risk=float(os.getenv("REWARD_RISK", d.reward_risk)),
+        volume_period=int(os.getenv("VOLUME_PERIOD", d.volume_period)),
+        volume_mult=float(os.getenv("VOLUME_MULT", d.volume_mult)),
+    )
 
 
 @dataclass(frozen=True)
@@ -37,17 +72,7 @@ class Config:
 
     # Strategia
     interval: str  # minuti Bybit: 1,3,5,15,30,60,120,240,D
-    ema_fast: int
-    ema_slow: int
-    ema_trend: int
-    rsi_period: int
-    rsi_long_max: float
-    rsi_short_min: float
-    atr_period: int
-    atr_sl_mult: float
-    reward_risk: float
-    volume_period: int
-    volume_mult: float
+    strategy: StrategyParams
 
     # Rischio / esecuzione
     risk_per_trade_pct: float
@@ -60,12 +85,8 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
-        category = os.getenv("BYBIT_CATEGORY", "linear").strip().lower()
-        if category not in {"linear", "spot"}:
-            raise RuntimeError("BYBIT_CATEGORY deve essere 'linear' o 'spot'")
-        symbols = tuple(
-            s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT").split(",") if s.strip()
-        )
+        category = category_from_env()
+        symbols = symbols_from_env()
         return cls(
             bybit_api_key=_required("BYBIT_API_KEY"),
             bybit_api_secret=_required("BYBIT_API_SECRET"),
@@ -76,17 +97,7 @@ class Config:
             telegram_token=_required("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=int(_required("TELEGRAM_CHAT_ID")),
             interval=os.getenv("INTERVAL", "15"),
-            ema_fast=int(os.getenv("EMA_FAST", "9")),
-            ema_slow=int(os.getenv("EMA_SLOW", "21")),
-            ema_trend=int(os.getenv("EMA_TREND", "200")),
-            rsi_period=int(os.getenv("RSI_PERIOD", "14")),
-            rsi_long_max=float(os.getenv("RSI_LONG_MAX", "70")),
-            rsi_short_min=float(os.getenv("RSI_SHORT_MIN", "30")),
-            atr_period=int(os.getenv("ATR_PERIOD", "14")),
-            atr_sl_mult=float(os.getenv("ATR_SL_MULT", "1.5")),
-            reward_risk=float(os.getenv("REWARD_RISK", "2.0")),
-            volume_period=int(os.getenv("VOLUME_PERIOD", "20")),
-            volume_mult=float(os.getenv("VOLUME_MULT", "1.5")),
+            strategy=strategy_params_from_env(),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             max_position_usdt=float(os.getenv("MAX_POSITION_USDT", "1000")),
             approval_timeout_sec=int(os.getenv("APPROVAL_TIMEOUT_SEC", "300")),

@@ -142,3 +142,12 @@ def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signa
             indicators=ind,
         )
     return None
+
+
+def describe(p: StrategyParams) -> str:
+    vol = f"volume ≥ {p.volume_mult:g}× media {p.volume_period}" if p.volume_mult > 0 else "filtro volume off"
+    return (
+        f"EMA {p.ema_fast}/{p.ema_slow} + trend EMA {p.ema_trend}, RSI {p.rsi_period} "
+        f"(long < {p.rsi_long_max:g}, short > {p.rsi_short_min:g}), {vol}, "
+        f"SL {p.atr_sl_mult:g}×ATR {p.atr_period}, R:R {p.reward_risk:g}"
+    )

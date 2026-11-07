@@ -66,6 +66,21 @@ cp .env.example .env   # poi compila le chiavi
 python -m clatrader
 ```
 
+## Backtest
+Usa **gli stessi parametri del bot** letti dal `.env` (simboli, timeframe, categoria e tutti i
+parametri della strategia) e i dati storici pubblici di Bybit: non servono chiavi API.
+
+```bash
+python -m clatrader.backtest                        # tutto dal .env
+python -m clatrader.backtest BTCUSDT ETHUSDT -i 60 -n 5000   # simboli, timeframe e n. candele
+VOLUME_MULT=0 python -m clatrader.backtest          # confronto senza filtro volume
+python -m clatrader.backtest -c spot                # solo long, fee spot
+```
+
+I risultati sono in **R** (1 R = la perdita di uno stop), commissioni taker incluse.
+Il backtest è volutamente semplice: ingresso alla chiusura della candela, nessuno slippage,
+e se nella stessa candela vengono toccati sia stop sia target conta lo stop.
+
 ## Comandi Telegram
 | Comando | Descrizione |
 |---|---|
@@ -79,8 +94,7 @@ python -m clatrader
 ## Percorso consigliato verso il conto reale
 1. `BYBIT_TESTNET=true`, `DRY_RUN=true` → verifica che i messaggi arrivino.
 2. `BYBIT_TESTNET=true`, `DRY_RUN=false` → ordini veri sul testnet.
-3. Backtest sui tuoi simboli/timeframe: `python -m clatrader.backtest BTCUSDT 15 5000`
-   (dati pubblici, nessuna chiave richiesta). Valuta almeno 30+ trade.
+3. Backtest (vedi sotto). Valuta almeno 30+ trade.
 4. Solo allora `BYBIT_TESTNET=false` con rischio basso (es. `RISK_PER_TRADE_PCT=0.5`).
 
 ## Struttura

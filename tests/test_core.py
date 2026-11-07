@@ -106,3 +106,43 @@ def test_backtest_runs():
     prices = [100 + 10 * math.sin(i / 15) + i * 0.05 for i in range(800)]
     res = run(_series(prices), StrategyParams(ema_trend=50))
     assert res.trades >= 0
+
+
+def test_strategy_params_from_env(monkeypatch):
+    from clatrader.config import strategy_params_from_env
+
+    monkeypatch.setenv("VOLUME_MULT", "0")
+    monkeypatch.setenv("EMA_FAST", "5")
+    monkeypatch.delenv("EMA_SLOW", raising=False)
+    p = strategy_params_from_env()
+    assert p.volume_mult == 0 and p.ema_fast == 5 and p.ema_slow == StrategyParams().ema_slow
+
+
+def test_config_uses_same_strategy_params(monkeypatch):
+    from clatrader.config import Config
+
+    for k, v in {
+        "BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s",
+        "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1", "VOLUME_MULT": "2.5",
+    }.items():
+        monkeypatch.setenv(k, v)
+    assert Config.from_env().strategy.volume_mult == 2.5
+
+
+def test_backtest_main_reads_env(monkeypatch, capsys):
+    import math
+    import sys
+
+    import clatrader.backtest as bt
+
+    prices = [100 + 10 * math.sin(i / 15) + i * 0.05 for i in range(800)]
+    monkeypatch.setattr(bt, "fetch", lambda *a, **k: _series(prices))
+    monkeypatch.setenv("SYMBOLS", "AAAUSDT,BBBUSDT")
+    monkeypatch.setenv("VOLUME_MULT", "0")
+    monkeypatch.setenv("EMA_TREND", "50")
+    monkeypatch.setenv("BYBIT_CATEGORY", "spot")
+    monkeypatch.setattr(sys, "argv", ["backtest"])
+    bt.main()
+    out = capsys.readouterr().out
+    assert "filtro volume off" in out and "trend EMA 50" in out and "solo long" in out
+    assert "AAAUSDT:" in out and "BBBUSDT:" in out
