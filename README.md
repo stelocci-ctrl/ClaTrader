@@ -94,7 +94,7 @@ e se nella stessa candela vengono toccati sia stop sia target conta lo stop.
 ## Percorso consigliato verso il conto reale
 1. `BYBIT_TESTNET=true`, `DRY_RUN=true` → verifica che i messaggi arrivino.
 2. `BYBIT_TESTNET=true`, `DRY_RUN=false` → ordini veri sul testnet.
-3. Backtest (vedi sotto). Valuta almeno 30+ trade.
+3. Backtest (vedi sopra). Valuta almeno 30+ trade.
 4. Solo allora `BYBIT_TESTNET=false` con rischio basso (es. `RISK_PER_TRADE_PCT=0.5`).
 
 ## Struttura
@@ -109,6 +109,9 @@ clatrader/
   backtest.py    backtest su dati storici Bybit
 tests/           test unitari (pytest)
 ```
+
+I test girano automaticamente su GitHub Actions (Python 3.11–3.13) a ogni pull request e
+push su `main`. In locale: `pip install -r requirements-dev.txt && python -m pytest`.
 
 ## Note
 - I segnali in attesa sono in memoria: se riavvii il bot, quelli non autorizzati si perdono
