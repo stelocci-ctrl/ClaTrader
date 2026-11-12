@@ -5,6 +5,7 @@ EMA_*, RSI_*, ATR_*, REWARD_RISK, VOLUME_*). Gli argomenti da riga di comando
 hanno la precedenza:
 
     python -m clatrader.backtest                       # tutto dal .env
+    python -m clatrader.backtest -s breakout           # trend following giornaliero + robustezza
     python -m clatrader.backtest BTCUSDT -i 60 -n 5000
     VOLUME_MULT=0 python -m clatrader.backtest         # sovrascrive una variabile
 """
@@ -112,16 +113,56 @@ def run(
     return res
 
 
+def _date(ms: int) -> str:
+    from datetime import datetime, timezone
+
+    return datetime.fromtimestamp(ms / 1000, tz=timezone.utc).strftime("%d/%m/%Y")
+
+
+def report_breakout(symbol: str, candles: list[Candle], fee: float, slippage: float) -> None:
+    from .breakout import GRID, BreakoutParams, simulate
+
+    base = simulate(candles, BreakoutParams(), fee, slippage)
+    print(f"{symbol}: {len(candles)} candele dal {_date(base.start_ms)} al {_date(base.end_ms)}")
+    print(f"  Parametri base ({BreakoutParams().label()}):")
+    print(f"  operazioni {base.n} · vinte {base.win_rate:.0f}% · media {base.avg_r:+.2f} R · "
+          f"totale {base.total_r:+.1f} R (prima dei costi {base.total_r_gross:+.1f} R)")
+    print(f"  drawdown max {base.max_drawdown_r:.1f} R · peggior serie {base.max_losing_streak} perdite · "
+          f"miglior operazione {base.best_r:+.1f} R")
+    print(f"  ≈ {base.total_r:+.0f}% con rischio 1% per operazione  vs  buy & hold {base.buy_hold_pct:+.0f}%")
+    if base.trades and base.trades[-1].reason == "aperta":
+        print(f"  (operazione ancora aperta: {base.trades[-1].r_net:+.1f} R, non conteggiata)")
+    if base.n < 30:
+        print("  ⚠ meno di 30 operazioni: risultato poco significativo.")
+
+    print("  Robustezza (media R/operazione · numero operazioni):")
+    results = [(p, simulate(candles, p, fee, slippage)) for p in GRID]
+    for p, r in results:
+        mark = "+" if r.avg_r > 0 else "-"
+        print(f"    {mark} {p.label():38s} {r.avg_r:+.2f} R · {r.n:3d} op. · DD {r.max_drawdown_r:4.1f} R")
+    positive = sum(r.avg_r > 0 for _, r in results)
+    print(f"  → positive {positive} su {len(results)} combinazioni")
+    print()
+
+
 def main() -> None:
     load_dotenv()
     ap = argparse.ArgumentParser(description="Backtest ClaTrader con i parametri del .env")
     ap.add_argument("symbols", nargs="*", help="simboli (default: SYMBOLS del .env)")
-    ap.add_argument("-i", "--interval", default=os.getenv("INTERVAL", "15"), help="timeframe Bybit")
-    ap.add_argument("-n", "--candles", type=int, default=3000, help="numero di candele")
+    ap.add_argument("-i", "--interval", default=None, help="timeframe: minuti (15, 60, 240) o D")
+    ap.add_argument("-n", "--candles", type=int, default=None, help="numero di candele")
     ap.add_argument("-c", "--category", choices=["linear", "spot"], default=None)
     ap.add_argument("-r", "--region", choices=list(REGION_TLD), default=None, help="global o eu")
     ap.add_argument("-e", "--exchange", choices=list(EXCHANGES), default=None, help="bybit o okx")
+    ap.add_argument("-s", "--strategy", choices=["ema", "breakout"], default="ema",
+                    help="ema = strategia del bot | breakout = trend following (default TF giornaliero)")
+    ap.add_argument("--slippage", type=float, default=0.05, help="slippage %% per lato (breakout)")
     args = ap.parse_args()
+    breakout = args.strategy == "breakout"
+    if args.interval is None:
+        args.interval = "D" if breakout else os.getenv("INTERVAL", "15")
+    if args.candles is None:
+        args.candles = 2000 if breakout else 3000
 
     exchange = args.exchange or exchange_from_env()
     region = args.region or region_from_env()
@@ -130,7 +171,10 @@ def main() -> None:
     params = strategy_params_from_env()
     fee = FEES_PCT[category]
 
-    print(f"Strategia: {describe(params)}")
+    if args.strategy == "breakout":
+        print("Strategia: trend following breakout (Donchian), solo long")
+    else:
+        print(f"Strategia: {describe(params)}")
     print(f"Mercato: {exchange.upper()} {'EU' if region == 'eu' else 'global'} {category} · TF {args.interval} · fee {fee}% per lato"
           + (" · solo long" if category == "spot" else ""))
     print()
@@ -139,6 +183,9 @@ def main() -> None:
             candles = fetch_okx(symbol, args.interval, args.candles, region)
         else:
             candles = fetch(symbol, args.interval, args.candles, category, REGION_TLD[region])
+        if args.strategy == "breakout":
+            report_breakout(symbol, candles, fee, args.slippage)
+            continue
         r = run(candles, params, fee, allow_short=category != "spot")
         wr = r.wins / r.trades * 100 if r.trades else 0
         avg = r.total_r / r.trades if r.trades else 0

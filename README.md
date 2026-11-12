@@ -113,6 +113,17 @@ VOLUME_MULT=0 python -m clatrader.backtest          # confronto senza filtro vol
 python -m clatrader.backtest -c spot                # solo long, fee spot
 ```
 
+### Trend following giornaliero (breakout, solo backtest per ora)
+```bash
+python -m clatrader.backtest -s breakout                       # candele giornaliere, ~2000 giorni
+python -m clatrader.backtest -s breakout -r global BTCUSDT ETHUSDT   # storico più lungo (coppie USDT)
+```
+Entra quando la chiusura supera il massimo degli ultimi 20 giorni (all'apertura del giorno dopo),
+stop iniziale a 2×ATR, esce quando la chiusura scende sotto il minimo degli ultimi 10 giorni.
+Mostra risultato prima/dopo i costi (commissioni + slippage), drawdown, confronto con buy & hold
+e una **prova di robustezza** su 12 combinazioni di parametri: una strategia credibile è positiva
+nella gran parte delle combinazioni e su più monete, non in una sola.
+
 I risultati sono in **R** (1 R = la perdita di uno stop), commissioni taker incluse.
 Il backtest è volutamente semplice: ingresso alla chiusura della candela, nessuno slippage,
 e se nella stessa candela vengono toccati sia stop sia target conta lo stop.

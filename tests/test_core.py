@@ -612,3 +612,90 @@ def _update_with(sent):
     from types import SimpleNamespace
 
     return SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=_Msg(sent))
+
+
+# ------------------------------------------------------------------ breakout
+def _daily(prices, spread=0.01):
+    day = 86_400_000
+    out = []
+    for i, p in enumerate(prices):
+        prev = prices[i - 1] if i else p
+        out.append(Candle(i * day, prev, max(prev, p) * (1 + spread), min(prev, p) * (1 - spread), p, 1.0))
+    return out
+
+
+def test_breakout_rides_trend_and_exits_on_channel():
+    from clatrader.breakout import BreakoutParams, simulate
+
+    p = BreakoutParams(entry_period=10, exit_period=5, atr_period=5, stop_atr=3.0)
+    prices = [100.0] * 15 + [100 + 2 * i for i in range(1, 41)] + [180 - 4 * i for i in range(1, 15)]
+    r = simulate(_daily(prices), p, fee_pct=0.1, slippage_pct=0.05)
+    assert r.n == 1
+    t = r.trades[0]
+    assert t.reason == "uscita" and t.r_net > 2  # trend lungo cavalcato: guadagno di più R
+    assert t.r_net < t.r_gross  # commissioni e slippage sottratti
+    assert r.buy_hold_pct != 0
+
+
+def test_breakout_stop_and_gap_below_stop():
+    from clatrader.breakout import BreakoutParams, simulate
+
+    p = BreakoutParams(entry_period=10, exit_period=5, atr_period=5, stop_atr=1.0)
+    prices = [100.0] * 15 + [103.0, 104.0, 105.0, 60.0, 60.0]
+    candles = _daily(prices, spread=0.002)
+    # il giorno del crollo APRE già a 70, molto sotto lo stop (gap)
+    c = candles[18]
+    candles[18] = Candle(c.start_ms, 70.0, 70.5, 59.0, 60.0, 1.0)
+    r = simulate(candles, p, fee_pct=0, slippage_pct=0)
+    t = r.trades[0]
+    assert t.reason == "stop" and t.exit == 70.0 and t.exit < t.stop  # esce all'apertura, non allo stop
+    assert t.r_gross < -1
+
+    # senza gap si esce esattamente allo stop: -1 R prima dei costi
+    r2 = simulate(_daily([100.0] * 15 + [103.0, 104.0, 60.0, 60.0], spread=0.002), p, fee_pct=0, slippage_pct=0)
+    assert r2.trades[0].reason == "stop" and abs(r2.trades[0].r_gross + 1) < 1e-9
+
+
+def test_breakout_has_no_lookahead():
+    """Le operazioni chiuse con i dati fino al giorno k non cambiano aggiungendo giorni dopo."""
+    import random
+
+    from clatrader.breakout import BreakoutParams, simulate
+
+    rng = random.Random(7)
+    prices = [100.0]
+    for _ in range(400):
+        prices.append(prices[-1] * (1 + rng.gauss(0.001, 0.03)))
+    candles = _daily(prices)
+    full = simulate(candles, BreakoutParams())
+    for k in (150, 250, 350):
+        part = simulate(candles[:k], BreakoutParams())
+        closed_before = [t for t in full.closed if t.exit_ms < candles[k - 1].start_ms]
+        assert [(t.entry_ms, t.exit_ms, round(t.r_net, 9)) for t in part.closed if t.exit_ms < candles[k - 1].start_ms] == \
+               [(t.entry_ms, t.exit_ms, round(t.r_net, 9)) for t in closed_before]
+
+
+def test_backtest_breakout_cli(monkeypatch, capsys):
+    import random
+    import sys
+
+    import clatrader.backtest as bt
+
+    rng = random.Random(1)
+    prices = [100.0]
+    for _ in range(600):
+        prices.append(prices[-1] * (1 + rng.gauss(0.002, 0.03)))
+    seen = {}
+
+    def fake_fetch_okx(symbol, interval, n, region):
+        seen.update(interval=interval, n=n)
+        return _daily(prices)
+
+    monkeypatch.setattr(bt, "fetch_okx", fake_fetch_okx)
+    monkeypatch.setenv("EXCHANGE", "okx")
+    monkeypatch.setenv("SYMBOLS", "BTCUSDC")
+    monkeypatch.setattr(sys, "argv", ["backtest", "-s", "breakout"])
+    bt.main()
+    out = capsys.readouterr().out
+    assert seen == {"interval": "D", "n": 2000}
+    assert "buy & hold" in out and "Robustezza" in out and "su 12 combinazioni" in out
