@@ -366,3 +366,46 @@ def test_test_command_requests_approval():
     trade = next(iter(bot.pending.values()))
     assert trade.signal.side == "Buy" and trade.signal.stop_loss < trade.signal.entry < trade.signal.take_profit
     assert "PROVA" in bot.telegram[-1] and "USDC" in bot.telegram[-1]
+
+
+def test_diagnose_reports_which_order_is_refused(monkeypatch, capsys):
+    import clatrader.diagnose as dg
+    from pybit.exceptions import InvalidRequestError
+
+    class Session(_FakeSession):
+        def __init__(self):
+            self.cancelled = []
+
+        def get_tickers(self, **kw):
+            return {"result": {"list": [{"lastPrice": "73000"}]}}
+
+        def place_order(self, **kw):
+            if "takeProfit" in kw:
+                raise InvalidRequestError("POST /v5/order/create", "regulatory restrictions", 10024, "now", None)
+            return {"result": {"orderId": "abc"}}
+
+        def cancel_order(self, **kw):
+            self.cancelled.append(kw["orderId"])
+
+    session = Session()
+    _bot_env(monkeypatch, BYBIT_REGION="eu", BYBIT_CATEGORY="spot", SYMBOLS="BTCUSDC", BYBIT_TESTNET="true")
+    monkeypatch.setattr(dg.BybitClient, "__init__", lambda self, *a: (
+        setattr(self, "category", "spot"), setattr(self, "session", session),
+        setattr(self, "_rules", {}), setattr(self, "_base_coin", {}), setattr(self, "_quote_coin", {})
+    ) and None)
+    monkeypatch.setattr("sys.argv", ["diagnose"])
+    dg.main()
+    out = capsys.readouterr().out
+    assert "1. Ordine limite semplice: ACCETTATO" in out
+    assert "2. Ordine limite con TP/SL agganciati: RIFIUTATO (codice 10024)" in out
+    assert session.cancelled  # gli ordini accettati vengono cancellati
+
+
+def test_diagnose_refuses_mainnet(monkeypatch):
+    import pytest
+
+    import clatrader.diagnose as dg
+
+    _bot_env(monkeypatch, BYBIT_REGION="eu", BYBIT_CATEGORY="spot", SYMBOLS="BTCUSDC", BYBIT_TESTNET="false")
+    with pytest.raises(SystemExit, match="solo con BYBIT_TESTNET=true"):
+        dg.main()
