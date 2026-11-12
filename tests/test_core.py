@@ -165,7 +165,7 @@ def test_start_message_is_valid_telegram_html():
     bot = object.__new__(ClaTrader)
     bot.cfg = SimpleNamespace(
         telegram_chat_id=1, symbols=("BTCUSDT",), interval="15", category="linear",
-        risk_per_trade_pct=1.0, bybit_testnet=True, dry_run=True,
+        risk_per_trade_pct=1.0, bybit_testnet=True, dry_run=True, region="global",
     )
     bot.params = StrategyParams()
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=Msg())
@@ -174,3 +174,84 @@ def test_start_message_is_valid_telegram_html():
     assert sent, "/start non ha risposto"
     without_tags = re.sub(r"</?(b|i|code)>", "", sent[0])
     assert "<" not in without_tags and ">" not in without_tags
+
+
+def _bot_env(monkeypatch, **extra):
+    for k, v in {
+        "BYBIT_API_KEY": "k", "BYBIT_API_SECRET": "s",
+        "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1", **extra,
+    }.items():
+        monkeypatch.setenv(k, v)
+
+
+def test_bybit_eu_requires_spot(monkeypatch):
+    import pytest
+
+    from clatrader.config import Config
+
+    _bot_env(monkeypatch, BYBIT_REGION="eu", BYBIT_CATEGORY="linear")
+    with pytest.raises(RuntimeError, match="spot"):
+        Config.from_env()
+
+
+def test_bybit_eu_uses_eu_servers(monkeypatch):
+    from clatrader.config import Config
+    from clatrader.exchange import BybitClient
+
+    _bot_env(monkeypatch, BYBIT_REGION="eu", BYBIT_CATEGORY="spot", SYMBOLS="BTCUSDC")
+    cfg = Config.from_env()
+    assert cfg.tld == "eu" and cfg.symbols == ("BTCUSDC",)
+    client = BybitClient("k", "s", True, "spot", cfg.tld)
+    assert client.session.endpoint == "https://api-testnet.bybit.eu"
+
+
+def test_default_region_is_global(monkeypatch):
+    from clatrader.config import Config
+    from clatrader.exchange import BybitClient
+
+    _bot_env(monkeypatch)
+    monkeypatch.delenv("BYBIT_REGION", raising=False)
+    cfg = Config.from_env()
+    assert BybitClient("k", "s", True, "linear", cfg.tld).session.endpoint == "https://api-testnet.bybit.com"
+
+
+class _FakeSession:
+    """Risposte minime dell'API Bybit per una coppia spot in USDC."""
+
+    def get_instruments_info(self, **kw):
+        return {"result": {"list": [{
+            "baseCoin": "BTC", "quoteCoin": "USDC",
+            "lotSizeFilter": {"basePrecision": "0.000001", "minOrderQty": "0.00001",
+                              "maxOrderQty": "100", "minOrderAmt": "5"},
+            "priceFilter": {"tickSize": "0.01"},
+        }]}}
+
+    def get_wallet_balance(self, **kw):
+        return {"result": {"list": [{"coin": [
+            {"coin": "USDT", "walletBalance": "999"},
+            {"coin": "USDC", "walletBalance": "250.5"},
+        ]}]}}
+
+
+def test_spot_equity_uses_quote_coin():
+    from clatrader.exchange import BybitClient
+
+    client = BybitClient("k", "s", True, "spot", "eu")
+    client.session = _FakeSession()
+    assert client.quote_currency("BTCUSDC") == "USDC"
+    assert client.get_equity("BTCUSDC") == 250.5
+
+
+def test_unknown_symbol_has_clear_error():
+    import pytest
+
+    from clatrader.exchange import BybitClient
+
+    class Empty(_FakeSession):
+        def get_instruments_info(self, **kw):
+            return {"result": {"list": []}}
+
+    client = BybitClient("k", "s", True, "spot", "eu")
+    client.session = Empty()
+    with pytest.raises(RuntimeError, match="BTCUSDT non disponibile"):
+        client.get_rules("BTCUSDT")

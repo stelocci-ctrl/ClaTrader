@@ -17,7 +17,7 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
 
-from .config import category_from_env, strategy_params_from_env, symbols_from_env
+from .config import REGION_TLD, category_from_env, region_from_env, strategy_params_from_env, symbols_from_env
 from .strategy import Candle, StrategyParams, describe, evaluate
 
 # commissione taker per lato, in %
@@ -31,8 +31,8 @@ class Result:
     total_r: float = 0.0
 
 
-def fetch(symbol: str, interval: str, n: int, category: str = "linear") -> list[Candle]:
-    s = HTTP(testnet=False)
+def fetch(symbol: str, interval: str, n: int, category: str = "linear", tld: str = "com") -> list[Candle]:
+    s = HTTP(testnet=False, tld=tld)
     out: list[Candle] = []
     end = None
     while len(out) < n:
@@ -90,19 +90,21 @@ def main() -> None:
     ap.add_argument("-i", "--interval", default=os.getenv("INTERVAL", "15"), help="timeframe Bybit")
     ap.add_argument("-n", "--candles", type=int, default=3000, help="numero di candele")
     ap.add_argument("-c", "--category", choices=["linear", "spot"], default=None)
+    ap.add_argument("-r", "--region", choices=list(REGION_TLD), default=None, help="global o eu")
     args = ap.parse_args()
 
+    region = args.region or region_from_env()
     category = args.category or category_from_env()
     symbols = [s.upper() for s in args.symbols] or list(symbols_from_env())
     params = strategy_params_from_env()
     fee = FEES_PCT[category]
 
     print(f"Strategia: {describe(params)}")
-    print(f"Mercato: {category} · TF {args.interval} · fee {fee}% per lato"
+    print(f"Mercato: Bybit {'EU' if region == 'eu' else 'global'} {category} · TF {args.interval} · fee {fee}% per lato"
           + (" · solo long" if category == "spot" else ""))
     print()
     for symbol in symbols:
-        candles = fetch(symbol, args.interval, args.candles, category)
+        candles = fetch(symbol, args.interval, args.candles, category, REGION_TLD[region])
         r = run(candles, params, fee, allow_short=category != "spot")
         wr = r.wins / r.trades * 100 if r.trades else 0
         avg = r.total_r / r.trades if r.trades else 0

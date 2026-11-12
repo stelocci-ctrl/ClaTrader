@@ -41,7 +41,9 @@ class PendingTrade:
 class ClaTrader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.client = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret, cfg.bybit_testnet, cfg.category)
+        self.client = BybitClient(
+            cfg.bybit_api_key, cfg.bybit_api_secret, cfg.bybit_testnet, cfg.category, cfg.tld
+        )
         self.params = cfg.strategy
         self.pending: dict[str, PendingTrade] = {}
         self.last_signal_candle: dict[str, int] = {}
@@ -60,6 +62,8 @@ class ClaTrader:
 
     def _mode_label(self) -> str:
         net = "TESTNET" if self.cfg.bybit_testnet else "MAINNET"
+        if self.cfg.region == "eu":
+            net = f"Bybit EU {net}"
         return f"{net}{' · DRY-RUN' if self.cfg.dry_run else ''}"
 
     # ------------------------------------------------------------ ciclo strategia
@@ -99,7 +103,8 @@ class ClaTrader:
             log.info("Posizione già aperta su %s, segnale ignorato", symbol)
             return
 
-        equity = await asyncio.to_thread(self.client.get_equity_usdt)
+        equity = await asyncio.to_thread(self.client.get_equity, symbol)
+        ccy = await asyncio.to_thread(self.client.quote_currency, symbol)
         rules = await asyncio.to_thread(self.client.get_rules, symbol)
         max_value = self.cfg.max_position_usdt
         if self.cfg.category == "linear":
@@ -113,12 +118,14 @@ class ClaTrader:
             await self._send(
                 app,
                 f"ℹ️ Segnale {signal.side} su {symbol} scartato: quantità sotto il minimo "
-                f"(equity {equity:.2f} USDT).",
+                f"(saldo {equity:.2f} {ccy}).",
             )
             return
-        await self._request_approval(app, signal, qty, equity)
+        await self._request_approval(app, signal, qty, equity, ccy)
 
-    async def _request_approval(self, app: Application, s: Signal, qty: Decimal, equity: float) -> None:
+    async def _request_approval(
+        self, app: Application, s: Signal, qty: Decimal, equity: float, ccy: str
+    ) -> None:
         trade = PendingTrade(id=secrets.token_hex(4), signal=s, qty=qty, created_at=time.time())
         self.pending[trade.id] = trade
 
@@ -134,9 +141,9 @@ class ClaTrader:
             f"Entry: <code>{s.entry:g}</code>\n"
             f"Stop loss: <code>{s.stop_loss:.6g}</code>\n"
             f"Take profit: <code>{s.take_profit:.6g}</code>\n"
-            f"Quantità: <code>{qty}</code> (≈ {notional:.2f} USDT)\n"
-            f"Rischio: <b>{risk:.2f} USDT</b> ({risk / equity * 100:.2f}% equity) · "
-            f"Target: {reward:.2f} USDT\n"
+            f"Quantità: <code>{qty}</code> (≈ {notional:.2f} {ccy})\n"
+            f"Rischio: <b>{risk:.2f} {ccy}</b> ({risk / equity * 100:.2f}% del saldo) · "
+            f"Target: {reward:.2f} {ccy}\n"
             f"RSI {ind['rsi']:.1f} · ATR {ind['atr']:.6g} · Vol {ind['rel_volume']:.1f}× media · TF {self.cfg.interval} · candela {candle_t}\n\n"
             f"⏳ Scade tra {self.cfg.approval_timeout_sec // 60} min."
         )
@@ -247,8 +254,15 @@ class ClaTrader:
     async def cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
             return
-        eq = await asyncio.to_thread(self.client.get_equity_usdt)
-        await update.effective_message.reply_html(f"💰 Equity: <b>{eq:.2f} USDT</b>")
+        lines, seen = [], set()
+        for sym in self.cfg.symbols:
+            ccy = await asyncio.to_thread(self.client.quote_currency, sym)
+            if ccy in seen:
+                continue
+            seen.add(ccy)
+            eq = await asyncio.to_thread(self.client.get_equity, sym)
+            lines.append(f"💰 Saldo: <b>{eq:.2f} {ccy}</b>")
+        await update.effective_message.reply_html("\n".join(lines))
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):

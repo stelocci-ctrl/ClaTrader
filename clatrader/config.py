@@ -23,6 +23,18 @@ def _required(name: str) -> str:
     return val
 
 
+# Bybit internazionale (bybit.com) e Bybit EU (bybit.eu) sono servizi separati:
+# chiavi API, server e prodotti diversi.
+REGION_TLD = {"global": "com", "eu": "eu"}
+
+
+def region_from_env() -> str:
+    region = os.getenv("BYBIT_REGION", "global").strip().lower()
+    if region not in REGION_TLD:
+        raise RuntimeError("BYBIT_REGION deve essere 'global' (bybit.com) o 'eu' (bybit.eu)")
+    return region
+
+
 def category_from_env() -> str:
     category = os.getenv("BYBIT_CATEGORY", "linear").strip().lower()
     if category not in {"linear", "spot"}:
@@ -62,6 +74,7 @@ class Config:
     bybit_api_key: str
     bybit_api_secret: str
     bybit_testnet: bool
+    region: str  # "global" (bybit.com) oppure "eu" (bybit.eu)
     category: str  # "linear" (perpetual USDT) oppure "spot"
     symbols: tuple[str, ...]
     leverage: int
@@ -76,7 +89,7 @@ class Config:
 
     # Rischio / esecuzione
     risk_per_trade_pct: float
-    max_position_usdt: float
+    max_position_usdt: float  # nella valuta di quotazione (USDT, USDC, EUR...)
     approval_timeout_sec: int
     max_price_deviation_pct: float
     poll_interval_sec: int
@@ -85,12 +98,19 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
+        region = region_from_env()
         category = category_from_env()
         symbols = symbols_from_env()
+        if region == "eu" and category != "spot":
+            raise RuntimeError(
+                "Bybit EU offre solo il mercato spot: imposta BYBIT_CATEGORY=spot "
+                "e simboli in USDC o EUR (es. SYMBOLS=BTCUSDC,ETHUSDC)"
+            )
         return cls(
             bybit_api_key=_required("BYBIT_API_KEY"),
             bybit_api_secret=_required("BYBIT_API_SECRET"),
             bybit_testnet=_bool("BYBIT_TESTNET", True),
+            region=region,
             category=category,
             symbols=symbols,
             leverage=int(os.getenv("LEVERAGE", "1")),
@@ -105,3 +125,7 @@ class Config:
             poll_interval_sec=int(os.getenv("POLL_INTERVAL_SEC", "60")),
             dry_run=_bool("DRY_RUN", True),
         )
+
+    @property
+    def tld(self) -> str:
+        return REGION_TLD[self.region]

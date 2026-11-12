@@ -61,6 +61,19 @@ cp .env.example .env   # poi compila le chiavi
    **Non abilitare mai Withdraw.** Se il bot gira su un server con IP fisso, vincola la chiave a quell'IP.
 4. Serve un conto **Unified Trading Account (UTA)**.
 
+### Bybit EU (conto europeo, bybit.eu)
+Bybit EU è un servizio **separato** da bybit.com: chiavi API, server e prodotti diversi.
+Se il tuo conto è su **bybit.eu** (testnet: testnet.bybit.eu):
+```
+BYBIT_REGION=eu
+BYBIT_CATEGORY=spot
+SYMBOLS=BTCUSDC,ETHUSDC
+```
+- Bybit EU offre solo lo **spot** (niente perpetual), quindi il bot opera **solo long**.
+- Per le regole europee (MiCA) non ci sono coppie in USDT: usa coppie in **USDC** o **EUR**.
+  Il saldo e il rischio sono calcolati nella valuta della coppia.
+- Con chiavi di bybit.eu ma `BYBIT_REGION=global` Bybit risponde con errore **401**.
+
 ### 3. Avvio
 ```bash
 python -m clatrader

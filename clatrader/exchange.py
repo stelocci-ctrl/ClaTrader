@@ -17,11 +17,13 @@ LEVERAGE_NOT_MODIFIED = 110043
 
 
 class BybitClient:
-    def __init__(self, api_key: str, api_secret: str, testnet: bool, category: str):
+    def __init__(self, api_key: str, api_secret: str, testnet: bool, category: str, tld: str = "com"):
         self.category = category
-        self.session = HTTP(testnet=testnet, api_key=api_key, api_secret=api_secret)
+        # tld="eu" -> api(-testnet).bybit.eu (Bybit EU), "com" -> bybit.com
+        self.session = HTTP(testnet=testnet, api_key=api_key, api_secret=api_secret, tld=tld)
         self._rules: dict[str, InstrumentRules] = {}
         self._base_coin: dict[str, str] = {}
+        self._quote_coin: dict[str, str] = {}
 
     # ---------------------------------------------------------------- mercato
     def get_closed_candles(self, symbol: str, interval: str, limit: int) -> list[Candle]:
@@ -45,6 +47,11 @@ class BybitClient:
         if symbol in self._rules:
             return self._rules[symbol]
         res = self.session.get_instruments_info(category=self.category, symbol=symbol)
+        if not res["result"]["list"]:
+            raise RuntimeError(
+                f"Simbolo {symbol} non disponibile su Bybit ({self.category}). "
+                "Su Bybit EU usa coppie in USDC o EUR, es. BTCUSDC."
+            )
         info = res["result"]["list"][0]
         lot = info["lotSizeFilter"]
         if self.category == "spot":
@@ -62,18 +69,27 @@ class BybitClient:
         )
         self._rules[symbol] = rules
         self._base_coin[symbol] = info.get("baseCoin", symbol.removesuffix("USDT"))
+        self._quote_coin[symbol] = info.get("quoteCoin") or info.get("settleCoin") or "USDT"
         return rules
 
+    def quote_currency(self, symbol: str) -> str:
+        """Valuta in cui sono espressi prezzi, saldo e rischio (USDT, USDC, EUR...)."""
+        self.get_rules(symbol)
+        if self.category == "linear":
+            return "USD"  # totalEquity del conto unificato è in USD
+        return self._quote_coin[symbol]
+
     # ---------------------------------------------------------------- account
-    def get_equity_usdt(self) -> float:
-        res = self.session.get_wallet_balance(accountType="UNIFIED")
-        acc = res["result"]["list"][0]
+    def get_equity(self, symbol: str) -> float:
+        """Capitale su cui calcolare il rischio, nella valuta di `quote_currency(symbol)`.
+
+        Spot: saldo della valuta di quotazione (es. USDC per BTCUSDC).
+        Linear: equity totale del conto unificato.
+        """
         if self.category == "spot":
-            for c in acc.get("coin", []):
-                if c["coin"] == "USDT":
-                    return float(c.get("walletBalance") or 0)
-            return 0.0
-        return float(acc.get("totalEquity") or 0)
+            return self.get_coin_balance(self.quote_currency(symbol))
+        res = self.session.get_wallet_balance(accountType="UNIFIED")
+        return float(res["result"]["list"][0].get("totalEquity") or 0)
 
     def get_coin_balance(self, coin: str) -> float:
         res = self.session.get_wallet_balance(accountType="UNIFIED", coin=coin)
