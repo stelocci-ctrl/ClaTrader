@@ -102,7 +102,8 @@ e se nella stessa candela vengono toccati sia stop sia target conta lo stop.
 | `/balance` | equity in USDT |
 | `/positions` | posizioni aperte sui simboli monitorati |
 | `/pause` / `/resume` | sospende / riprende l'analisi |
-| `/scan` | forza subito un'analisi |
+| `/scan` | mostra prezzo, medie, RSI e volume di ogni simbolo e **quale condizione manca** per un segnale, poi analizza |
+| `/test [SIMBOLO]` | **solo testnet**: crea un segnale LONG di prova al prezzo attuale per provare autorizzazione e ordini |
 
 ## Percorso consigliato verso il conto reale
 1. `BYBIT_TESTNET=true`, `DRY_RUN=true` → verifica che i messaggi arrivino.

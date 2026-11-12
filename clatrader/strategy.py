@@ -69,14 +69,33 @@ class StrategyParams:
         return max(self.ema_trend, self.ema_slow, self.rsi_period, self.atr_period, self.volume_period + 1) + 2
 
 
-def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signal | None:
-    """Ritorna un Signal se l'ultima candela chiusa genera un ingresso, altrimenti None.
+@dataclass
+class Analysis:
+    """Stato degli indicatori sull'ultima candela chiusa e, se c'è, il segnale."""
+
+    ready: bool = False  # False se mancano candele per calcolare gli indicatori
+    price: float = 0.0
+    ema_fast: float = 0.0
+    ema_slow: float = 0.0
+    ema_trend: float = 0.0
+    rsi: float = 0.0
+    atr: float = 0.0
+    rel_volume: float = 0.0
+    crossed_up: bool = False
+    crossed_down: bool = False
+    missing_long: list[str] = field(default_factory=list)  # condizioni LONG non soddisfatte
+    missing_short: list[str] = field(default_factory=list)
+    signal: Signal | None = None
+
+
+def analyze(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Analysis:
+    """Calcola gli indicatori sull'ultima candela chiusa e verifica le regole.
 
     `candles` deve essere ordinato dal più vecchio al più recente e contenere
     solo candele chiuse.
     """
     if len(candles) < p.min_candles:
-        return None
+        return Analysis()
 
     closes = [c.close for c in candles]
     highs = [c.high for c in candles]
@@ -93,20 +112,50 @@ def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signa
     i = len(candles) - 1
     values = (fast[i], slow[i], fast[i - 1], slow[i - 1], trend[i], r[i], a[i])
     if any(v is None for v in values):
-        return None
+        return Analysis()
     f_now, s_now, f_prev, s_prev, t_now, rsi_now, atr_now = values  # type: ignore[misc]
 
     price = closes[i]
-    crossed_up = f_prev <= s_prev and f_now > s_now
-    crossed_down = f_prev >= s_prev and f_now < s_now
-    stop_dist = atr_now * p.atr_sl_mult
-    if stop_dist <= 0:
-        return None
-
     volume_now = candles[i].volume
     avg_prev = vol_avg[i - 1]
     rel_volume = volume_now / avg_prev if avg_prev else 0.0
     volume_ok = p.volume_mult <= 0 or (avg_prev is not None and rel_volume >= p.volume_mult)
+    stop_dist = atr_now * p.atr_sl_mult
+
+    res = Analysis(
+        ready=True,
+        price=price,
+        ema_fast=f_now,
+        ema_slow=s_now,
+        ema_trend=t_now,
+        rsi=rsi_now,
+        atr=atr_now,
+        rel_volume=rel_volume,
+        crossed_up=f_prev <= s_prev and f_now > s_now,
+        crossed_down=f_prev >= s_prev and f_now < s_now,
+    )
+
+    common = []
+    if stop_dist <= 0:
+        common.append("ATR zero: prezzo fermo, impossibile calcolare lo stop")
+    if not volume_ok:
+        common.append(f"volume {rel_volume:.1f}× la media (serve ≥ {p.volume_mult:g}×)")
+
+    res.missing_long = list(common)
+    if not res.crossed_up:
+        res.missing_long.insert(0, f"nessun incrocio EMA{p.ema_fast} sopra EMA{p.ema_slow} su questa candela")
+    if price <= t_now:
+        res.missing_long.append(f"prezzo sotto EMA{p.ema_trend} (trend non rialzista)")
+    if rsi_now >= p.rsi_long_max:
+        res.missing_long.append(f"RSI {rsi_now:.1f} ≥ {p.rsi_long_max:g} (ipercomprato)")
+
+    res.missing_short = list(common)
+    if not res.crossed_down:
+        res.missing_short.insert(0, f"nessun incrocio EMA{p.ema_fast} sotto EMA{p.ema_slow} su questa candela")
+    if price >= t_now:
+        res.missing_short.append(f"prezzo sopra EMA{p.ema_trend} (trend non ribassista)")
+    if rsi_now <= p.rsi_short_min:
+        res.missing_short.append(f"RSI {rsi_now:.1f} ≤ {p.rsi_short_min:g} (ipervenduto)")
 
     ind = {
         "ema_fast": f_now,
@@ -119,8 +168,8 @@ def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signa
     }
     vol_txt = f", volume {rel_volume:.1f}× la media" if p.volume_mult > 0 else ""
 
-    if crossed_up and price > t_now and rsi_now < p.rsi_long_max and volume_ok:
-        return Signal(
+    if not res.missing_long:
+        res.signal = Signal(
             symbol=symbol,
             side="Buy",
             entry=price,
@@ -130,8 +179,8 @@ def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signa
             reason=f"EMA{p.ema_fast} ha incrociato sopra EMA{p.ema_slow}, prezzo sopra EMA{p.ema_trend}{vol_txt}",
             indicators=ind,
         )
-    if crossed_down and price < t_now and rsi_now > p.rsi_short_min and volume_ok:
-        return Signal(
+    elif not res.missing_short:
+        res.signal = Signal(
             symbol=symbol,
             side="Sell",
             entry=price,
@@ -141,7 +190,12 @@ def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signa
             reason=f"EMA{p.ema_fast} ha incrociato sotto EMA{p.ema_slow}, prezzo sotto EMA{p.ema_trend}{vol_txt}",
             indicators=ind,
         )
-    return None
+    return res
+
+
+def evaluate(symbol: str, candles: Sequence[Candle], p: StrategyParams) -> Signal | None:
+    """Ritorna un Signal se l'ultima candela chiusa genera un ingresso, altrimenti None."""
+    return analyze(symbol, candles, p).signal
 
 
 def describe(p: StrategyParams) -> str:

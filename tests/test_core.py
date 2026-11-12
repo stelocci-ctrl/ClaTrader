@@ -255,3 +255,114 @@ def test_unknown_symbol_has_clear_error():
     client.session = Empty()
     with pytest.raises(RuntimeError, match="BTCUSDT non disponibile"):
         client.get_rules("BTCUSDT")
+
+
+def test_analysis_explains_missing_conditions():
+    from clatrader.strategy import analyze
+
+    a = analyze("X", _series([100.0 + i for i in range(60)]), PARAMS)  # rialzo costante
+    assert a.ready and a.signal is None
+    assert any("nessun incrocio" in m for m in a.missing_long)
+    assert analyze("X", _series([1.0] * 5), PARAMS).ready is False
+
+
+class _FakeClient:
+    def __init__(self, candles):
+        self.candles = candles
+
+    def get_closed_candles(self, *a):
+        return self.candles
+
+    def get_last_price(self, symbol):
+        return self.candles[-1].close
+
+    def has_open_position(self, symbol):
+        return False
+
+    def get_equity(self, symbol):
+        return 10_000.0
+
+    def quote_currency(self, symbol):
+        return "USDC"
+
+    def get_rules(self, symbol):
+        return RULES
+
+
+class _Msg:
+    def __init__(self, sent):
+        self.sent = sent
+
+    async def reply_html(self, text):
+        self.sent.append(text)
+
+    async def reply_text(self, text):
+        self.sent.append(text)
+
+
+def _test_bot(testnet=True, category="spot"):
+    from types import SimpleNamespace
+
+    from clatrader.bot import ClaTrader
+
+    bot = object.__new__(ClaTrader)
+    bot.cfg = SimpleNamespace(
+        telegram_chat_id=1, symbols=("BTCUSDC",), interval="1", category=category, region="eu",
+        risk_per_trade_pct=1.0, bybit_testnet=testnet, dry_run=True, max_position_usdt=1000.0,
+        leverage=1, approval_timeout_sec=300,
+    )
+    bot.params = PARAMS
+    bot.client = _FakeClient(_series([100.0 + i for i in range(60)]))
+    bot.pending, bot.last_signal_candle, bot.paused = {}, {}, False
+    bot.telegram = []
+
+    async def send(app, text, **kw):
+        bot.telegram.append(text)
+        return SimpleNamespace(message_id=1)
+
+    bot._send = send
+    return bot
+
+
+def _ctx(args=()):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(args=list(args), application=None)
+
+
+def test_scan_command_reports_state_as_valid_html():
+    import asyncio
+    import re
+    from types import SimpleNamespace
+
+    bot = _test_bot()
+    sent = []
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=_Msg(sent))
+    asyncio.run(bot.cmd_scan(update, _ctx()))
+    assert "BTCUSDC" in sent[0] and "LONG: manca" in sent[0] and "SHORT" not in sent[0]
+    assert "<" not in re.sub(r"</?(b|i|code)>", "", sent[0])
+
+
+def test_test_command_only_on_testnet():
+    import asyncio
+    from types import SimpleNamespace
+
+    sent = []
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=_Msg(sent))
+    bot = _test_bot(testnet=False)
+    asyncio.run(bot.cmd_test(update, _ctx()))
+    assert "solo" in sent[0] and not bot.pending
+
+
+def test_test_command_requests_approval():
+    import asyncio
+    from types import SimpleNamespace
+
+    sent = []
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=_Msg(sent))
+    bot = _test_bot()
+    asyncio.run(bot.cmd_test(update, _ctx()))
+    assert len(bot.pending) == 1
+    trade = next(iter(bot.pending.values()))
+    assert trade.signal.side == "Buy" and trade.signal.stop_loss < trade.signal.entry < trade.signal.take_profit
+    assert "PROVA" in bot.telegram[-1] and "USDC" in bot.telegram[-1]
