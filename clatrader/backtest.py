@@ -1,6 +1,6 @@
-"""Backtest della strategia su dati pubblici Bybit (non servono chiavi API).
+"""Backtest della strategia su dati pubblici Bybit o OKX (non servono chiavi API).
 
-Usa gli stessi parametri del bot letti dal .env (SYMBOLS, INTERVAL, BYBIT_CATEGORY,
+Usa gli stessi parametri del bot letti dal .env (EXCHANGE, REGION, SYMBOLS, INTERVAL, CATEGORY,
 EMA_*, RSI_*, ATR_*, REWARD_RISK, VOLUME_*). Gli argomenti da riga di comando
 hanno la precedenza:
 
@@ -17,7 +17,15 @@ from dataclasses import dataclass
 from dotenv import load_dotenv
 from pybit.unified_trading import HTTP
 
-from .config import REGION_TLD, category_from_env, region_from_env, strategy_params_from_env, symbols_from_env
+from .config import (
+    EXCHANGES,
+    REGION_TLD,
+    category_from_env,
+    exchange_from_env,
+    region_from_env,
+    strategy_params_from_env,
+    symbols_from_env,
+)
 from .strategy import Candle, StrategyParams, describe, evaluate
 
 # commissione taker per lato, in %
@@ -46,6 +54,27 @@ def fetch(symbol: str, interval: str, n: int, category: str = "linear", tld: str
         out = list(reversed(batch)) + out
         end = int(rows[-1][0]) - 1
     return out[-n:][:-1]  # scarta la candela in formazione
+
+
+def fetch_okx(symbol: str, interval: str, n: int, region: str = "eu") -> list[Candle]:
+    """Candele storiche OKX spot (dati pubblici reali, non della Demo)."""
+    from .okx import OkxClient, to_timeframe
+
+    client = OkxClient("", "", "", testnet=False, region=region)
+    ex = client.ex
+    market = client._market(symbol)
+    tf = to_timeframe(interval)
+    tf_ms = ex.parse_timeframe(tf) * 1000
+    now = ex.milliseconds()
+    rows = ex.fetch_ohlcv(
+        market["symbol"], tf, since=now - (n + 1) * tf_ms,
+        params={"paginate": True, "paginationCalls": n // 100 + 5},
+    )
+    seen: dict[int, Candle] = {}
+    for r in rows:
+        if r[0] + tf_ms <= now:  # solo candele chiuse
+            seen[int(r[0])] = Candle(int(r[0]), float(r[1]), float(r[2]), float(r[3]), float(r[4]), float(r[5] or 0))
+    return [seen[k] for k in sorted(seen)][-n:]
 
 
 def run(
@@ -91,20 +120,25 @@ def main() -> None:
     ap.add_argument("-n", "--candles", type=int, default=3000, help="numero di candele")
     ap.add_argument("-c", "--category", choices=["linear", "spot"], default=None)
     ap.add_argument("-r", "--region", choices=list(REGION_TLD), default=None, help="global o eu")
+    ap.add_argument("-e", "--exchange", choices=list(EXCHANGES), default=None, help="bybit o okx")
     args = ap.parse_args()
 
+    exchange = args.exchange or exchange_from_env()
     region = args.region or region_from_env()
-    category = args.category or category_from_env()
+    category = "spot" if exchange == "okx" else (args.category or category_from_env())
     symbols = [s.upper() for s in args.symbols] or list(symbols_from_env())
     params = strategy_params_from_env()
     fee = FEES_PCT[category]
 
     print(f"Strategia: {describe(params)}")
-    print(f"Mercato: Bybit {'EU' if region == 'eu' else 'global'} {category} · TF {args.interval} · fee {fee}% per lato"
+    print(f"Mercato: {exchange.upper()} {'EU' if region == 'eu' else 'global'} {category} · TF {args.interval} · fee {fee}% per lato"
           + (" · solo long" if category == "spot" else ""))
     print()
     for symbol in symbols:
-        candles = fetch(symbol, args.interval, args.candles, category, REGION_TLD[region])
+        if exchange == "okx":
+            candles = fetch_okx(symbol, args.interval, args.candles, region)
+        else:
+            candles = fetch(symbol, args.interval, args.candles, category, REGION_TLD[region])
         r = run(candles, params, fee, allow_short=category != "spot")
         wr = r.wins / r.trades * 100 if r.trades else 0
         avg = r.total_r / r.trades if r.trades else 0

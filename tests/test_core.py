@@ -165,7 +165,7 @@ def test_start_message_is_valid_telegram_html():
     bot = object.__new__(ClaTrader)
     bot.cfg = SimpleNamespace(
         telegram_chat_id=1, symbols=("BTCUSDT",), interval="15", category="linear",
-        risk_per_trade_pct=1.0, bybit_testnet=True, dry_run=True, region="global",
+        risk_per_trade_pct=1.0, testnet=True, dry_run=True, region="global",
     )
     bot.params = StrategyParams()
     update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=Msg())
@@ -308,7 +308,7 @@ def _test_bot(testnet=True, category="spot"):
     bot = object.__new__(ClaTrader)
     bot.cfg = SimpleNamespace(
         telegram_chat_id=1, symbols=("BTCUSDC",), interval="1", category=category, region="eu",
-        risk_per_trade_pct=1.0, bybit_testnet=testnet, dry_run=True, max_position_usdt=1000.0,
+        risk_per_trade_pct=1.0, testnet=testnet, dry_run=True, max_position_usdt=1000.0,
         leverage=1, approval_timeout_sec=300,
     )
     bot.params = PARAMS
@@ -407,5 +407,127 @@ def test_diagnose_refuses_mainnet(monkeypatch):
     import clatrader.diagnose as dg
 
     _bot_env(monkeypatch, BYBIT_REGION="eu", BYBIT_CATEGORY="spot", SYMBOLS="BTCUSDC", BYBIT_TESTNET="false")
-    with pytest.raises(SystemExit, match="solo con BYBIT_TESTNET=true"):
+    with pytest.raises(SystemExit, match="solo con TESTNET=true"):
         dg.main()
+
+
+# ------------------------------------------------------------------ OKX
+OKX_BTC_USDC = {
+    "instType": "SPOT", "instId": "BTC-USDC", "baseCcy": "BTC", "quoteCcy": "USDC",
+    "lotSz": "0.00000001", "minSz": "0.00001", "tickSz": "0.1", "state": "live",
+    "maxMktSz": "1000000", "maxLmtSz": "9999999999", "ctVal": "", "ctMult": "", "settleCcy": "",
+    "ctValCcy": "", "uly": "", "instFamily": "", "listTime": "1600000000000", "expTime": "",
+    "lever": "", "optType": "", "stk": "", "alias": "", "ctType": "",
+}
+
+
+def _okx_client(testnet=True):
+    from clatrader.okx import OkxClient
+
+    client = OkxClient("k", "s", "p", testnet, "eu")
+    client.ex.set_markets([client.ex.parse_market(OKX_BTC_USDC)])
+    client._markets_loaded = True
+    return client
+
+
+def test_timeframe_conversion():
+    from clatrader.okx import to_timeframe
+
+    assert [to_timeframe(x) for x in ("1", "15", "60", "240", "D", "W")] == ["1m", "15m", "1h", "4h", "1d", "1w"]
+
+
+def test_okx_eu_demo_endpoint_and_rules():
+    client = _okx_client()
+    assert client.ex.hostname == "eea.okx.com"
+    assert client.ex.headers.get("x-simulated-trading") == "1"  # Demo Trading
+    rules = client.get_rules("BTCUSDC")
+    assert rules.qty_step == Decimal("0.00000001") and rules.min_qty == Decimal("0.00001")
+    assert rules.tick_size == Decimal("0.1")
+    assert client.quote_currency("BTCUSDC") == "USDC"
+
+
+def test_okx_unknown_symbol():
+    import pytest
+
+    with pytest.raises(RuntimeError, match="BTCUSDT non disponibile su OKX"):
+        _okx_client().get_rules("BTCUSDT")
+
+
+def test_okx_drops_open_candle():
+    client = _okx_client()
+    now = 10 * 60_000 + 30_000  # a metà della candela delle 10:00 (TF 1m)
+    client.ex.milliseconds = lambda: now
+    client.ex.fetch_ohlcv = lambda *a, **k: [[i * 60_000, 1, 2, 0.5, 1.5, 3] for i in range(11)]
+    candles = client.get_closed_candles("BTCUSDC", "1", 50)
+    assert len(candles) == 10 and candles[-1].start_ms == 9 * 60_000
+
+
+def test_okx_market_order_attaches_tp_sl():
+    from clatrader.strategy import Signal
+
+    client = _okx_client()
+    sent = {}
+
+    def fake_order(request, params=None):
+        sent.update(request[0] if isinstance(request, list) else request)
+        return {"code": "0", "data": [{"ordId": "123", "sCode": "0", "sMsg": ""}]}
+
+    # ccxt usa batch-orders di default; intercettiamo entrambi gli endpoint
+    client.ex.privatePostTradeBatchOrders = fake_order
+    client.ex.privatePostTradeOrder = fake_order
+    sig = Signal("BTCUSDC", "Buy", 73000.0, 72000.04, 75000.06, 0, "test")
+    res = client.place_market_order(sig, Decimal("0.0137"))
+
+    assert res["orderId"] == "123"
+    assert sent["instId"] == "BTC-USDC" and sent["side"] == "buy" and sent["ordType"] == "market"
+    assert sent["tdMode"] == "cash" and sent["tgtCcy"] == "base_ccy" and sent["sz"] == "0.0137"
+    algo = sent["attachAlgoOrds"][0]
+    assert algo["tpTriggerPx"] == "75000.1" and algo["slTriggerPx"] == "72000"
+    assert algo["tpOrdPx"] == "-1" and algo["slOrdPx"] == "-1"  # chiusura a mercato
+
+
+def test_okx_balance_and_position():
+    client = _okx_client()
+    client.ex.fetch_balance = lambda *a, **k: {"total": {"USDC": 5000.0, "BTC": 0.002}}
+    assert client.get_equity("BTCUSDC") == 5000.0
+    assert client.has_open_position("BTCUSDC")
+
+
+def test_config_okx(monkeypatch):
+    import pytest
+
+    from clatrader.config import Config
+    from clatrader.exchange import make_client
+    from clatrader.okx import OkxClient
+
+    for k, v in {"EXCHANGE": "okx", "REGION": "eu", "TESTNET": "true", "OKX_API_KEY": "k",
+                 "OKX_API_SECRET": "s", "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1",
+                 "SYMBOLS": "BTCUSDC"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("OKX_API_PASSPHRASE", raising=False)
+    with pytest.raises(RuntimeError, match="OKX_API_PASSPHRASE"):
+        Config.from_env()
+    monkeypatch.setenv("OKX_API_PASSPHRASE", "p")
+    cfg = Config.from_env()
+    assert cfg.exchange == "okx" and cfg.category == "spot" and cfg.testnet
+    assert isinstance(make_client(cfg), OkxClient)
+
+
+def test_backtest_fetch_okx_keeps_closed_sorted_unique(monkeypatch):
+    import clatrader.backtest as bt
+    import clatrader.okx as okx
+
+    real = okx.OkxClient
+
+    def fake_client(*a, **k):
+        c = real("k", "s", "p", False, "eu")
+        c.ex.set_markets([c.ex.parse_market(OKX_BTC_USDC)])
+        c._markets_loaded = True
+        c.ex.milliseconds = lambda: 5 * 60_000 + 10_000
+        rows = [[i * 60_000, 1, 2, 0.5, 1.5, 3] for i in (3, 1, 2, 2, 4, 5)]  # disordinate, duplicate, 5 aperta
+        c.ex.fetch_ohlcv = lambda *a, **k: rows
+        return c
+
+    monkeypatch.setattr(okx, "OkxClient", fake_client)
+    candles = bt.fetch_okx("BTCUSDC", "1", 3)
+    assert [c.start_ms // 60_000 for c in candles] == [2, 3, 4]

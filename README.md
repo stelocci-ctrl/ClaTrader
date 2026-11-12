@@ -1,5 +1,5 @@
 # ClaTrader
-Trading con Claude: un bot che analizza il mercato su **Bybit**, genera segnali con una
+Trading con Claude: un bot che analizza il mercato su **OKX** o **Bybit**, genera segnali con una
 strategia trend-following e **ti chiede l'autorizzazione su Telegram** prima di aprire
 qualsiasi operazione. Nessun ordine parte senza il tuo ✅.
 
@@ -54,7 +54,28 @@ cp .env.example .env   # poi compila le chiavi
 2. Scrivi a [@userinfobot](https://t.me/userinfobot) per ottenere il tuo id → `TELEGRAM_CHAT_ID`.
 3. Apri la chat con il tuo nuovo bot e premi **Start** (altrimenti non può scriverti).
 
-### 2. Chiave API Bybit
+### 2. Chiave API OKX (consigliato in Europa)
+OKX Europe (my.okx.com, sede a Malta) ha la **licenza MiCA** e permette il trading via API ai privati,
+con un conto **Demo Trading** per le prove.
+1. Registrati su **https://my.okx.com** (sito europeo).
+2. Passa alla **Demo Trading**: menu *Trade* → *Demo Trading*. Riceverai fondi virtuali.
+3. Dentro la Demo Trading: *Personal Center* → **Create Demo Account API key**.
+   Permessi **Read** e **Trade** (mai *Withdraw*), scegli una **passphrase** e annotala.
+   Le chiavi della Demo funzionano solo in Demo; per il conto reale ne servono altre.
+4. Nel `.env`:
+   ```
+   EXCHANGE=okx
+   REGION=eu
+   TESTNET=true
+   SYMBOLS=BTCUSDC,ETHUSDC
+   OKX_API_KEY=...
+   OKX_API_SECRET=...
+   OKX_API_PASSPHRASE=...
+   ```
+- Su OKX il bot opera in **spot**, quindi **solo long**, con stop loss e take profit agganciati all'ordine.
+- Per il conto reale OKX richiede la verifica dell'identità (KYC).
+
+### 2b. Chiave API Bybit (alternativa)
 1. Per i test: crea un account su [testnet.bybit.com](https://testnet.bybit.com) e prendi fondi di prova.
 2. *API Management* → *Create New Key* → *System-generated*.
 3. Permessi: **Read-Write**, spunta solo *Contracts → Orders/Positions* (e/o *Spot → Trade*).
@@ -65,14 +86,16 @@ cp .env.example .env   # poi compila le chiavi
 Bybit EU è un servizio **separato** da bybit.com: chiavi API, server e prodotti diversi.
 Se il tuo conto è su **bybit.eu** (testnet: testnet.bybit.eu):
 ```
-BYBIT_REGION=eu
-BYBIT_CATEGORY=spot
+REGION=eu
+CATEGORY=spot
 SYMBOLS=BTCUSDC,ETHUSDC
 ```
 - Bybit EU offre solo lo **spot** (niente perpetual), quindi il bot opera **solo long**.
 - Per le regole europee (MiCA) non ci sono coppie in USDT: usa coppie in **USDC** o **EUR**.
   Il saldo e il rischio sono calcolati nella valuta della coppia.
-- Con chiavi di bybit.eu ma `BYBIT_REGION=global` Bybit risponde con errore **401**.
+- Con chiavi di bybit.eu ma `REGION=global` Bybit risponde con errore **401**.
+- Su alcuni conti Bybit EU il trading via API è bloccato (errore **10024**, restrizioni normative):
+  in quel caso usa OKX. `python -m clatrader.diagnose` verifica se il tuo conto può inviare ordini.
 
 ### 3. Avvio
 ```bash
@@ -81,7 +104,7 @@ python -m clatrader
 
 ## Backtest
 Usa **gli stessi parametri del bot** letti dal `.env` (simboli, timeframe, categoria e tutti i
-parametri della strategia) e i dati storici pubblici di Bybit: non servono chiavi API.
+parametri della strategia) e i dati storici pubblici dell'exchange scelto: non servono chiavi API.
 
 ```bash
 python -m clatrader.backtest                        # tutto dal .env
@@ -106,10 +129,10 @@ e se nella stessa candela vengono toccati sia stop sia target conta lo stop.
 | `/test [SIMBOLO]` | **solo testnet**: crea un segnale LONG di prova al prezzo attuale per provare autorizzazione e ordini |
 
 ## Percorso consigliato verso il conto reale
-1. `BYBIT_TESTNET=true`, `DRY_RUN=true` → verifica che i messaggi arrivino.
-2. `BYBIT_TESTNET=true`, `DRY_RUN=false` → ordini veri sul testnet.
+1. `TESTNET=true`, `DRY_RUN=true` → verifica che i messaggi arrivino.
+2. `TESTNET=true`, `DRY_RUN=false` → ordini veri sul testnet.
 3. Backtest (vedi sopra). Valuta almeno 30+ trade.
-4. Solo allora `BYBIT_TESTNET=false` con rischio basso (es. `RISK_PER_TRADE_PCT=0.5`).
+4. Solo allora `TESTNET=false` con rischio basso (es. `RISK_PER_TRADE_PCT=0.5`).
 
 ## Struttura
 ```
@@ -118,9 +141,11 @@ clatrader/
   indicators.py  EMA, RSI, ATR in puro Python
   strategy.py    regole di ingresso, SL/TP
   risk.py        dimensionamento posizione e arrotondamenti
-  exchange.py    client Bybit v5 (pybit)
+  exchange.py    client Bybit v5 (pybit) e scelta dell'exchange
+  okx.py         client OKX spot (ccxt)
+  diagnose.py    diagnosi ordini su testnet Bybit
   bot.py         bot Telegram, approvazioni ed esecuzione
-  backtest.py    backtest su dati storici Bybit
+  backtest.py    backtest su dati storici Bybit/OKX
 tests/           test unitari (pytest)
 ```
 
@@ -129,5 +154,5 @@ push su `main`. In locale: `pip install -r requirements-dev.txt && python -m pyt
 
 ## Note
 - I segnali in attesa sono in memoria: se riavvii il bot, quelli non autorizzati si perdono
-  (le posizioni aperte restano su Bybit con i loro SL/TP).
+  (le posizioni aperte restano sull'exchange con i loro SL/TP).
 - Tieni il bot sempre acceso (VPS, Raspberry Pi, `systemd`, `tmux`…) per ricevere i segnali.

@@ -16,6 +16,15 @@ def _bool(name: str, default: bool) -> bool:
     return val.strip().lower() in {"1", "true", "yes", "on", "si", "sì"}
 
 
+def _first(*names: str, default: str = "") -> str:
+    """Valore della prima variabile definita (per nomi nuovi con fallback ai vecchi BYBIT_*)."""
+    for n in names:
+        val = os.getenv(n)
+        if val is not None and val.strip():
+            return val.strip()
+    return default
+
+
 def _required(name: str) -> str:
     val = os.getenv(name, "").strip()
     if not val:
@@ -23,22 +32,33 @@ def _required(name: str) -> str:
     return val
 
 
-# Bybit internazionale (bybit.com) e Bybit EU (bybit.eu) sono servizi separati:
-# chiavi API, server e prodotti diversi.
+EXCHANGES = ("bybit", "okx")
+
+# Regione: "global" oppure "eu". Per Bybit: bybit.com / bybit.eu (servizi separati,
+# chiavi diverse). Per OKX: www.okx.com / eea.okx.com (OKX Europe, MiCA).
 REGION_TLD = {"global": "com", "eu": "eu"}
 
 
+def exchange_from_env() -> str:
+    exchange = _first("EXCHANGE", default="bybit").lower()
+    if exchange not in EXCHANGES:
+        raise RuntimeError(f"EXCHANGE deve essere uno tra: {', '.join(EXCHANGES)}")
+    return exchange
+
+
 def region_from_env() -> str:
-    region = os.getenv("BYBIT_REGION", "global").strip().lower()
+    region = _first("REGION", "BYBIT_REGION", default="global").lower()
     if region not in REGION_TLD:
-        raise RuntimeError("BYBIT_REGION deve essere 'global' (bybit.com) o 'eu' (bybit.eu)")
+        raise RuntimeError("REGION deve essere 'global' oppure 'eu'")
     return region
 
 
 def category_from_env() -> str:
-    category = os.getenv("BYBIT_CATEGORY", "linear").strip().lower()
+    if exchange_from_env() == "okx":
+        return "spot"  # il client OKX gestisce solo lo spot
+    category = _first("CATEGORY", "BYBIT_CATEGORY", default="linear").lower()
     if category not in {"linear", "spot"}:
-        raise RuntimeError("BYBIT_CATEGORY deve essere 'linear' o 'spot'")
+        raise RuntimeError("CATEGORY deve essere 'linear' o 'spot'")
     return category
 
 
@@ -70,11 +90,13 @@ def strategy_params_from_env() -> StrategyParams:
 
 @dataclass(frozen=True)
 class Config:
-    # Bybit
-    bybit_api_key: str
-    bybit_api_secret: str
-    bybit_testnet: bool
-    region: str  # "global" (bybit.com) oppure "eu" (bybit.eu)
+    # Exchange
+    exchange: str  # "bybit" oppure "okx"
+    api_key: str
+    api_secret: str
+    api_passphrase: str  # solo OKX
+    testnet: bool  # Bybit testnet / OKX Demo Trading
+    region: str  # "global" oppure "eu"
     category: str  # "linear" (perpetual USDT) oppure "spot"
     symbols: tuple[str, ...]
     leverage: int
@@ -98,18 +120,23 @@ class Config:
     @classmethod
     def from_env(cls) -> "Config":
         load_dotenv()
+        exchange = exchange_from_env()
         region = region_from_env()
         category = category_from_env()
         symbols = symbols_from_env()
-        if region == "eu" and category != "spot":
+        if exchange == "bybit" and region == "eu" and category != "spot":
             raise RuntimeError(
-                "Bybit EU offre solo il mercato spot: imposta BYBIT_CATEGORY=spot "
+                "Bybit EU offre solo il mercato spot: imposta CATEGORY=spot "
                 "e simboli in USDC o EUR (es. SYMBOLS=BTCUSDC,ETHUSDC)"
             )
+        prefix = exchange.upper()
+        testnet_raw = _first("TESTNET", "BYBIT_TESTNET", default="true")
         return cls(
-            bybit_api_key=_required("BYBIT_API_KEY"),
-            bybit_api_secret=_required("BYBIT_API_SECRET"),
-            bybit_testnet=_bool("BYBIT_TESTNET", True),
+            exchange=exchange,
+            api_key=_required(f"{prefix}_API_KEY"),
+            api_secret=_required(f"{prefix}_API_SECRET"),
+            api_passphrase=_required("OKX_API_PASSPHRASE") if exchange == "okx" else "",
+            testnet=testnet_raw.lower() in {"1", "true", "yes", "on", "si", "sì"},
             region=region,
             category=category,
             symbols=symbols,

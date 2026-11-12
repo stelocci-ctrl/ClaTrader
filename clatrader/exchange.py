@@ -152,3 +152,12 @@ class BybitClient:
         log.info("Invio ordine: %s", params)
         res = self.session.place_order(**params)
         return res["result"]
+
+
+def make_client(cfg):
+    """Crea il client dell'exchange scelto in configurazione (EXCHANGE=bybit|okx)."""
+    if cfg.exchange == "okx":
+        from .okx import OkxClient
+
+        return OkxClient(cfg.api_key, cfg.api_secret, cfg.api_passphrase, cfg.testnet, cfg.region)
+    return BybitClient(cfg.api_key, cfg.api_secret, cfg.testnet, cfg.category, cfg.tld)

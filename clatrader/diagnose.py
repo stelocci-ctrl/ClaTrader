@@ -46,10 +46,12 @@ def _try(client: BybitClient, name: str, params: dict) -> bool:
 
 def main() -> None:
     cfg = Config.from_env()
-    if not cfg.bybit_testnet:
-        sys.exit("Per sicurezza la diagnosi funziona solo con BYBIT_TESTNET=true.")
+    if cfg.exchange != "bybit":
+        sys.exit("La diagnosi degli ordini è disponibile solo per Bybit.")
+    if not cfg.testnet:
+        sys.exit("Per sicurezza la diagnosi funziona solo con TESTNET=true.")
     symbol = sys.argv[1].upper() if len(sys.argv) > 1 else cfg.symbols[0]
-    client = BybitClient(cfg.bybit_api_key, cfg.bybit_api_secret, True, cfg.category, cfg.tld)
+    client = BybitClient(cfg.api_key, cfg.api_secret, True, cfg.category, cfg.tld)
 
     rules = client.get_rules(symbol)
     price = Decimal(str(client.get_last_price(symbol)))

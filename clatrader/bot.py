@@ -21,7 +21,7 @@ from telegram.ext import (
 )
 
 from .config import Config
-from .exchange import BybitClient
+from .exchange import make_client
 from .risk import position_size
 from .strategy import Analysis, Signal, analyze, describe
 
@@ -41,9 +41,7 @@ class PendingTrade:
 class ClaTrader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
-        self.client = BybitClient(
-            cfg.bybit_api_key, cfg.bybit_api_secret, cfg.bybit_testnet, cfg.category, cfg.tld
-        )
+        self.client = make_client(cfg)
         self.params = cfg.strategy
         self.pending: dict[str, PendingTrade] = {}
         self.last_signal_candle: dict[str, int] = {}
@@ -61,9 +59,14 @@ class ClaTrader:
         )
 
     def _mode_label(self) -> str:
-        net = "TESTNET" if self.cfg.bybit_testnet else "MAINNET"
-        if self.cfg.region == "eu":
-            net = f"Bybit EU {net}"
+        exchange = getattr(self.cfg, "exchange", "bybit")
+        if exchange == "okx":
+            name = "OKX Europe" if self.cfg.region == "eu" else "OKX"
+            net = f"{name} {'DEMO' if self.cfg.testnet else 'CONTO REALE'}"
+        else:
+            net = "TESTNET" if self.cfg.testnet else "MAINNET"
+            if self.cfg.region == "eu":
+                net = f"Bybit EU {net}"
         return f"{net}{' · DRY-RUN' if self.cfg.dry_run else ''}"
 
     # ------------------------------------------------------------ ciclo strategia
@@ -334,8 +337,8 @@ class ClaTrader:
         """Solo testnet: crea un segnale LONG di prova al prezzo attuale per provare il flusso."""
         if not self._authorized(update):
             return
-        if not self.cfg.bybit_testnet:
-            await update.effective_message.reply_text("🚫 /test funziona solo con BYBIT_TESTNET=true.")
+        if not self.cfg.testnet:
+            await update.effective_message.reply_text("🚫 /test funziona solo con TESTNET=true (testnet o conto demo).")
             return
         sym = (context.args[0].upper() if context.args else self.cfg.symbols[0])
         if sym not in self.cfg.symbols:
