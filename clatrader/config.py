@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
+from .breakout import BreakoutParams
 from .strategy import StrategyParams
 
 
@@ -66,6 +67,27 @@ def symbols_from_env() -> tuple[str, ...]:
     return tuple(s.strip().upper() for s in os.getenv("SYMBOLS", "BTCUSDT").split(",") if s.strip())
 
 
+STRATEGIES = ("ema", "breakout")
+
+
+def strategy_name_from_env() -> str:
+    name = _first("STRATEGY", default="ema").lower()
+    if name not in STRATEGIES:
+        raise RuntimeError(f"STRATEGY deve essere uno tra: {', '.join(STRATEGIES)}")
+    return name
+
+
+def breakout_params_from_env() -> BreakoutParams:
+    load_dotenv()
+    d = BreakoutParams()
+    return BreakoutParams(
+        entry_period=int(_first("BREAKOUT_ENTRY_DAYS", default=str(d.entry_period))),
+        exit_period=int(_first("BREAKOUT_EXIT_DAYS", default=str(d.exit_period))),
+        atr_period=int(_first("BREAKOUT_ATR_PERIOD", default=str(d.atr_period))),
+        stop_atr=float(_first("BREAKOUT_STOP_ATR", default=str(d.stop_atr))),
+    )
+
+
 def strategy_params_from_env() -> StrategyParams:
     """Parametri della strategia dal .env (valori mancanti = default di StrategyParams).
 
@@ -116,6 +138,8 @@ class Config:
     max_price_deviation_pct: float
     poll_interval_sec: int
     dry_run: bool
+    strategy_name: str = "ema"  # "ema" (incrocio medie) oppure "breakout" (trend following giornaliero)
+    breakout: BreakoutParams = BreakoutParams()
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -129,6 +153,9 @@ class Config:
                 "Bybit EU offre solo il mercato spot: imposta CATEGORY=spot "
                 "e simboli in USDC o EUR (es. SYMBOLS=BTCUSDC,ETHUSDC)"
             )
+        strategy_name = strategy_name_from_env()
+        if strategy_name == "breakout" and category != "spot":
+            raise RuntimeError("STRATEGY=breakout funziona in spot: imposta CATEGORY=spot")
         prefix = exchange.upper()
         testnet_raw = _first("TESTNET", "BYBIT_TESTNET", default="true")
         return cls(
@@ -143,14 +170,21 @@ class Config:
             leverage=int(os.getenv("LEVERAGE", "1")),
             telegram_token=_required("TELEGRAM_BOT_TOKEN"),
             telegram_chat_id=int(_required("TELEGRAM_CHAT_ID")),
-            interval=os.getenv("INTERVAL", "15"),
+            # il breakout lavora sempre su candele giornaliere
+            interval="D" if strategy_name == "breakout" else os.getenv("INTERVAL", "15"),
             strategy=strategy_params_from_env(),
             risk_per_trade_pct=float(os.getenv("RISK_PER_TRADE_PCT", "1.0")),
             max_position_usdt=float(os.getenv("MAX_POSITION_USDT", "1000")),
-            approval_timeout_sec=int(os.getenv("APPROVAL_TIMEOUT_SEC", "300")),
-            max_price_deviation_pct=float(os.getenv("MAX_PRICE_DEVIATION_PCT", "0.5")),
+            # breakout giornaliero: il segnale arriva dopo la chiusura UTC (notte in Italia),
+            # quindi l'autorizzazione resta valida più a lungo e tollera più movimento
+            approval_timeout_sec=int(os.getenv(
+                "APPROVAL_TIMEOUT_SEC", "43200" if strategy_name == "breakout" else "300")),
+            max_price_deviation_pct=float(os.getenv(
+                "MAX_PRICE_DEVIATION_PCT", "3" if strategy_name == "breakout" else "0.5")),
             poll_interval_sec=int(os.getenv("POLL_INTERVAL_SEC", "60")),
             dry_run=_bool("DRY_RUN", True),
+            strategy_name=strategy_name,
+            breakout=breakout_params_from_env(),
         )
 
     @property

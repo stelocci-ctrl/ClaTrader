@@ -36,12 +36,19 @@ class SpotPositionBook:
         tmp.write_text(json.dumps(self._data, indent=2), encoding="utf-8")
         tmp.replace(self.path)
 
-    def open(self, symbol: str, qty: float, base_before: float, entry: float, sl: float, tp: float) -> None:
+    def open(
+        self, symbol: str, qty: float, base_before: float, entry: float, sl: float, tp: float | None
+    ) -> None:
         self._data[symbol] = {
             "qty": qty, "base_before": base_before, "entry": entry,
             "stop_loss": sl, "take_profit": tp, "opened_at": int(time.time()),
         }
         self._save()
+
+    def update(self, symbol: str, **fields: Any) -> None:
+        if symbol in self._data:
+            self._data[symbol].update(fields)
+            self._save()
 
     def get(self, symbol: str) -> dict[str, Any] | None:
         return self._data.get(symbol)

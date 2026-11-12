@@ -24,8 +24,10 @@ from telegram.ext import (
 
 from .config import Config
 from .exchange import make_client
+from .breakout import BreakoutParams
+from .breakout import analyze as analyze_breakout
 from .positions import SpotPositionBook
-from .risk import position_size
+from .risk import position_size, round_down_to_step
 from .strategy import Analysis, Signal, analyze, describe
 
 log = logging.getLogger("clatrader")
@@ -47,6 +49,8 @@ class ClaTrader:
         self.client = make_client(cfg)
         self.book = SpotPositionBook(Path(os.getenv("STATE_FILE", "clatrader_positions.json")))
         self.params = cfg.strategy
+        self.strategy_name = getattr(cfg, "strategy_name", "ema")
+        self.breakout = getattr(cfg, "breakout", BreakoutParams())
         self.pending: dict[str, PendingTrade] = {}
         self.last_signal_candle: dict[str, int] = {}
         self.paused = False
@@ -61,6 +65,19 @@ class ClaTrader:
         return await app.bot.send_message(
             chat_id=self.cfg.telegram_chat_id, text=text, parse_mode=ParseMode.HTML, **kw
         )
+
+    @property
+    def is_breakout(self) -> bool:
+        return getattr(self, "strategy_name", "ema") == "breakout"
+
+    def _describe_strategy(self) -> str:
+        if self.is_breakout:
+            b = self.breakout
+            return (
+                f"Trend following breakout giornaliero: entrata sopra il massimo a {b.entry_period} giorni, "
+                f"stop {b.stop_atr:g}×ATR{b.atr_period}, uscita automatica sotto il minimo a {b.exit_period} giorni"
+            )
+        return describe(self.params)
 
     def _mode_label(self) -> str:
         exchange = getattr(self.cfg, "exchange", "bybit")
@@ -102,7 +119,7 @@ class ClaTrader:
             change = (price - rec["entry"]) / rec["entry"] * 100
             if price <= rec["stop_loss"] * 1.002:
                 how = "🔴 probabilmente è scattato lo <b>stop loss</b>"
-            elif price >= rec["take_profit"] * 0.998:
+            elif rec.get("take_profit") and price >= rec["take_profit"] * 0.998:
                 how = "🟢 probabilmente è stato raggiunto il <b>take profit</b>"
             else:
                 how = "chiusa (stop, target o vendita manuale)"
@@ -115,6 +132,8 @@ class ClaTrader:
     async def scan(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._expire_pending(context.application)
         await self._check_closed_positions(context.application)
+        if self.is_breakout:
+            await self._check_exits(context.application)  # le uscite valgono anche in pausa
         if self.paused:
             return
         for symbol in self.cfg.symbols:
@@ -124,14 +143,73 @@ class ClaTrader:
                 log.exception("Errore durante l'analisi di %s", symbol)
                 await self._send(context.application, f"⚠️ Errore su {symbol}: <code>{html.escape(str(e))[:500]}</code>")
 
-    async def _analyze(self, symbol: str) -> tuple[Analysis, int | None]:
+    async def _candles(self, symbol: str):
+        need = self.breakout.warmup + 30 if self.is_breakout else self.params.min_candles + 50
+        return await asyncio.to_thread(self.client.get_closed_candles, symbol, self.cfg.interval, need)
+
+    async def _analyze(self, symbol: str):
         """Scarica le candele chiuse e analizza l'ultima. Ritorna anche il suo timestamp."""
-        candles = await asyncio.to_thread(
-            self.client.get_closed_candles, symbol, self.cfg.interval, self.params.min_candles + 50
-        )
+        candles = await self._candles(symbol)
+        if self.is_breakout:
+            if not candles:
+                return analyze_breakout(symbol, [], self.breakout), None
+            return analyze_breakout(symbol, candles, self.breakout), candles[-1].start_ms
         if not candles:
             return Analysis(), None
         return analyze(symbol, candles, self.params), candles[-1].start_ms
+
+    async def _check_exits(self, app: Application) -> None:
+        """Breakout: uscita AUTOMATICA quando la chiusura scende sotto il minimo di uscita."""
+        for symbol in self.book.symbols():
+            rec = self.book.get(symbol)
+            try:
+                if rec is None or not await self._has_position(symbol):
+                    continue
+                a, last = await self._analyze(symbol)
+                if last is None or not a.exit or rec.get("exit_attempt_ms") == last:
+                    continue
+                self.book.update(symbol, exit_attempt_ms=last)  # un solo tentativo per candela
+                await self._auto_exit(app, symbol, rec, a)
+            except Exception as e:  # noqa: BLE001
+                log.exception("Uscita automatica %s fallita", symbol)
+                await self._send(
+                    app,
+                    f"⚠️ <b>Uscita automatica {symbol} NON riuscita</b>: <code>{html.escape(str(e))[:300]}</code>\n"
+                    "Controlla la posizione su exchange e, se serve, vendi a mano.",
+                )
+
+    async def _auto_exit(self, app: Application, symbol: str, rec: dict, a) -> None:
+        base = await asyncio.to_thread(self.client.base_currency, symbol)
+        balance = await asyncio.to_thread(self.client.get_coin_balance, base)
+        rules = await asyncio.to_thread(self.client.get_rules, symbol)
+        # vendiamo solo ciò che ha comprato il bot (al netto della commissione presa in moneta base)
+        qty = round_down_to_step(min(rec["qty"], balance - rec["base_before"]), rules.qty_step)
+        if self.cfg.dry_run:
+            await self._send(app, f"🧪 DRY-RUN: segnale di uscita su {symbol}, nessun ordine inviato.")
+            return
+        warn = ""
+        try:
+            await asyncio.to_thread(self.client.cancel_protective_orders, symbol)
+        except Exception as e:  # noqa: BLE001
+            log.exception("Cancellazione stop %s fallita", symbol)
+            warn = (
+                f"\n⚠️ Non sono riuscito a cancellare lo stop loss ({html.escape(str(e))[:150]}): "
+                "cancellalo a mano su exchange."
+            )
+        if qty >= rules.min_qty:
+            await asyncio.to_thread(self.client.sell_market, symbol, qty)
+        price = await asyncio.to_thread(self.client.get_last_price, symbol)
+        self.book.close(symbol)
+        risk = rec["entry"] - rec["stop_loss"]
+        r = (price - rec["entry"]) / risk if risk > 0 else 0.0
+        change = (price - rec["entry"]) / rec["entry"] * 100
+        await self._send(
+            app,
+            f"🏁 <b>Uscita automatica {symbol}</b>: chiusura {a.price:g} sotto il minimo a "
+            f"{self.breakout.exit_period} giorni ({a.channel_low:g}).\n"
+            f"Venduti {qty} a circa {price:g} · ingresso {rec['entry']:g} · "
+            f"risultato <b>{r:+.2f} R</b> ({change:+.2f}%){warn}",
+        )
 
     async def _scan_symbol(self, app: Application, symbol: str) -> None:
         analysis, last = await self._analyze(symbol)
@@ -157,17 +235,8 @@ class ClaTrader:
             await self._send(app, f"ℹ️ Segnale su {symbol} ignorato: posizione già aperta.")
             return
 
-        equity = await asyncio.to_thread(self.client.get_equity, symbol)
         ccy = await asyncio.to_thread(self.client.quote_currency, symbol)
-        rules = await asyncio.to_thread(self.client.get_rules, symbol)
-        max_value = self.cfg.max_position_usdt
-        if self.cfg.category == "linear":
-            max_value = min(max_value, equity * self.cfg.leverage)
-        else:
-            max_value = min(max_value, equity)
-        qty = position_size(
-            equity, self.cfg.risk_per_trade_pct, signal.entry, signal.stop_distance, max_value, rules
-        )
+        qty, equity = await self._size(symbol, signal.entry, signal.stop_distance)
         if qty <= 0:
             await self._send(
                 app,
@@ -177,6 +246,18 @@ class ClaTrader:
             return
         await self._request_approval(app, signal, qty, equity, ccy)
 
+    async def _size(self, symbol: str, entry: float, stop_distance: float) -> tuple[Decimal, float]:
+        """Quantità che rischia RISK_PER_TRADE_PCT del saldo, con i tetti di posizione."""
+        equity = await asyncio.to_thread(self.client.get_equity, symbol)
+        rules = await asyncio.to_thread(self.client.get_rules, symbol)
+        max_value = self.cfg.max_position_usdt
+        if self.cfg.category == "linear":
+            max_value = min(max_value, equity * self.cfg.leverage)
+        else:
+            max_value = min(max_value, equity)  # spot: mai più del saldo disponibile
+        qty = position_size(equity, self.cfg.risk_per_trade_pct, entry, stop_distance, max_value, rules)
+        return qty, equity
+
     async def _request_approval(
         self, app: Application, s: Signal, qty: Decimal, equity: float, ccy: str
     ) -> None:
@@ -185,7 +266,6 @@ class ClaTrader:
 
         notional = float(qty) * s.entry
         risk = float(qty) * s.stop_distance
-        reward = risk * self.params.reward_risk
         candle_t = datetime.fromtimestamp(s.candle_start_ms / 1000, tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
         emoji = "🟢 LONG" if s.side == "Buy" else "🔴 SHORT"
         ind = s.indicators
@@ -194,12 +274,33 @@ class ClaTrader:
             f"{html.escape(s.reason)}\n\n"
             f"Entry: <code>{s.entry:g}</code>\n"
             f"Stop loss: <code>{s.stop_loss:.6g}</code>\n"
-            f"Take profit: <code>{s.take_profit:.6g}</code>\n"
-            f"Quantità: <code>{qty}</code> (≈ {notional:.2f} {ccy})\n"
-            f"Rischio: <b>{risk:.2f} {ccy}</b> ({risk / equity * 100:.2f}% del saldo) · "
-            f"Target: {reward:.2f} {ccy}\n"
-            f"RSI {ind['rsi']:.1f} · ATR {ind['atr']:.6g} · Vol {ind['rel_volume']:.1f}× media · TF {self.cfg.interval} · candela {candle_t}\n\n"
-            f"⏳ Scade tra {self.cfg.approval_timeout_sec // 60} min."
+            + (
+                f"Take profit: <code>{s.take_profit:.6g}</code>\n"
+                if s.take_profit is not None
+                else f"Take profit: nessuno · uscita automatica sotto il minimo a {self.breakout.exit_period} giorni\n"
+            )
+            + f"Quantità: <code>{qty}</code> (≈ {notional:.2f} {ccy}, {notional / equity * 100:.0f}% del saldo)\n"
+            f"Rischio: <b>{risk:.2f} {ccy}</b> ({risk / equity * 100:.2f}% del saldo)"
+            + (
+                f" · Target: {risk * self.params.reward_risk:.2f} {ccy}\n"
+                if s.take_profit is not None
+                else "\n"
+            )
+            + " · ".join(
+                part for part in (
+                    f"RSI {ind['rsi']:.1f}" if "rsi" in ind else "",
+                    f"ATR {ind['atr']:.6g}" if "atr" in ind else "",
+                    f"Vol {ind['rel_volume']:.1f}× media" if "rel_volume" in ind else "",
+                    f"TF {self.cfg.interval}",
+                    f"candela {candle_t}",
+                ) if part
+            )
+            + "\n\n"
+            + (
+                f"⏳ Scade tra {self.cfg.approval_timeout_sec / 3600:g} ore."
+                if self.cfg.approval_timeout_sec >= 3600
+                else f"⏳ Scade tra {self.cfg.approval_timeout_sec // 60} min."
+            )
         )
         kb = InlineKeyboardMarkup(
             [[
@@ -268,12 +369,21 @@ class ClaTrader:
                     f"(limite {self.cfg.max_price_deviation_pct}%). Ora {price:g}."
                 )
             # Il prezzo potrebbe aver superato SL/TP nel frattempo
-            if (s.side == "Buy" and not s.stop_loss < price < s.take_profit) or (
-                s.side == "Sell" and not s.take_profit < price < s.stop_loss
+            tp_hi = s.take_profit if s.take_profit is not None else float("inf")
+            tp_lo = s.take_profit if s.take_profit is not None else float("-inf")
+            if (s.side == "Buy" and not s.stop_loss < price < tp_hi) or (
+                s.side == "Sell" and not tp_lo < price < s.stop_loss
             ):
                 return f"🚫 <b>Annullato</b>: il prezzo attuale {price:g} è fuori dall'intervallo SL/TP."
             if await self._has_position(s.symbol):
                 return "🚫 <b>Annullato</b>: esiste già una posizione aperta."
+            # ricalcola la quantità sul prezzo attuale: lo stop è fisso, quindi il rischio resta quello scelto
+            qty, _ = await self._size(s.symbol, price, abs(price - s.stop_loss))
+            if qty <= 0:
+                return "🚫 <b>Annullato</b>: quantità sotto il minimo dell'exchange."
+            if qty != trade.qty:
+                log.info("Quantità ricalcolata %s -> %s (prezzo %s)", trade.qty, qty, price)
+                trade.qty = qty
             if self.cfg.dry_run:
                 log.info("DRY-RUN: ordine %s %s qty=%s non inviato", s.side, s.symbol, trade.qty)
                 return f"🧪 <b>Autorizzato (DRY-RUN)</b>: nessun ordine reale inviato. Prezzo attuale {price:g}."
@@ -285,7 +395,10 @@ class ClaTrader:
             res = await asyncio.to_thread(self.client.place_market_order, s, trade.qty)
             if self.cfg.category == "spot":
                 self.book.open(s.symbol, float(trade.qty), base_before, s.entry, s.stop_loss, s.take_profit)
-            return f"✅ <b>Ordine inviato</b> · ID <code>{html.escape(str(res.get('orderId')))}</code>"
+            return (
+                f"✅ <b>Ordine inviato</b> · quantità {trade.qty} · "
+                f"ID <code>{html.escape(str(res.get('orderId')))}</code>"
+            )
         except Exception as e:  # noqa: BLE001
             log.exception("Esecuzione fallita")
             return f"⚠️ <b>Errore</b>: <code>{html.escape(str(e))[:500]}</code>"
@@ -297,7 +410,7 @@ class ClaTrader:
         await update.effective_message.reply_html(
             f"🤖 <b>ClaTrader</b> attivo [{self._mode_label()}]\n"
             f"Simboli: {', '.join(self.cfg.symbols)} · TF {self.cfg.interval} · {self.cfg.category}\n"
-            f"Strategia: {html.escape(describe(self.params))}\n"
+            f"Strategia: {html.escape(self._describe_strategy())}\n"
             f"Rischio per trade: {self.cfg.risk_per_trade_pct}%\n\n"
             "/status /balance /positions /pause /resume /scan /test"
         )
@@ -337,7 +450,8 @@ class ClaTrader:
                 change = (price - rec["entry"]) / rec["entry"] * 100
                 lines.append(
                     f"{sym} LONG {rec['qty']:g} @ {rec['entry']:g} · SL {rec['stop_loss']:.6g} · "
-                    f"TP {rec['take_profit']:.6g} · ora {price:g} ({change:+.2f}%)"
+                    + (f"TP {rec['take_profit']:.6g}" if rec.get("take_profit") else "uscita automatica")
+                    + f" · ora {price:g} ({change:+.2f}%)"
                 )
             await update.effective_message.reply_text(
                 "\n".join(lines) if lines else "Nessuna posizione aperta dal bot."
@@ -376,6 +490,24 @@ class ClaTrader:
             except Exception as e:  # noqa: BLE001
                 lines.append(f"\n<b>{sym}</b>: ⚠️ <code>{html.escape(str(e))[:200]}</code>")
                 continue
+            if self.is_breakout:
+                b = self.breakout
+                if not a.ready:
+                    lines.append(f"\n<b>{sym}</b>: dati insufficienti (servono {b.warmup + 1} giorni)")
+                    continue
+                gap = (a.channel_high / a.price - 1) * 100
+                lines.append(
+                    f"\n<b>{sym}</b> chiusura <code>{a.price:g}</code>\n"
+                    f"massimo {b.entry_period}g {a.channel_high:g} · minimo {b.exit_period}g {a.channel_low:g} · "
+                    f"ATR {a.atr:.6g}"
+                )
+                if a.signal:
+                    lines.append("✅ Breakout: segnale LONG!")
+                else:
+                    lines.append(f"Nessun breakout: la chiusura è {gap:.1f}% sotto il massimo a {b.entry_period} giorni")
+                if self.book.get(sym) and a.exit:
+                    lines.append("🏁 Condizione di uscita attiva per la posizione aperta")
+                continue
             if not a.ready:
                 lines.append(f"\n<b>{sym}</b>: dati insufficienti (servono {p.min_candles} candele)")
                 continue
@@ -412,16 +544,23 @@ class ClaTrader:
         a, last = await self._analyze(sym)
         price = await asyncio.to_thread(self.client.get_last_price, sym)
         # sul testnet il prezzo può essere quasi fermo: almeno 1% di distanza dello stop
-        stop = max(a.atr * self.params.atr_sl_mult, price * 0.01)
+        if self.is_breakout:
+            stop = max(a.atr * self.breakout.stop_atr, price * 0.01)
+            tp = None
+            ind = {"atr": a.atr}
+        else:
+            stop = max(a.atr * self.params.atr_sl_mult, price * 0.01)
+            tp = price + stop * self.params.reward_risk
+            ind = {"rsi": a.rsi, "atr": a.atr, "rel_volume": a.rel_volume}
         signal = Signal(
             symbol=sym,
             side="Buy",
             entry=price,
             stop_loss=price - stop,
-            take_profit=price + stop * self.params.reward_risk,
+            take_profit=tp,
             candle_start_ms=last or int(time.time() * 1000),
             reason="🧪 SEGNALE DI PROVA creato con /test (non è un segnale della strategia)",
-            indicators={"rsi": a.rsi, "atr": a.atr, "rel_volume": a.rel_volume},
+            indicators=ind,
         )
         await self._propose(context.application, signal)
 

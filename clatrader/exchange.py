@@ -146,15 +146,30 @@ class BybitClient:
             "side": signal.side,
             "orderType": "Market",
             "qty": str(qty),
-            "takeProfit": str(round_to_tick(signal.take_profit, rules.tick_size)),
             "stopLoss": str(round_to_tick(signal.stop_loss, rules.tick_size)),
         }
+        if signal.take_profit is not None:
+            params["takeProfit"] = str(round_to_tick(signal.take_profit, rules.tick_size))
         if self.category == "linear":
-            params.update(positionIdx=0, tpslMode="Full", tpTriggerBy="MarkPrice", slTriggerBy="MarkPrice")
+            params.update(positionIdx=0, tpslMode="Full", slTriggerBy="MarkPrice")
+            if signal.take_profit is not None:
+                params["tpTriggerBy"] = "MarkPrice"
         else:
             params["marketUnit"] = "baseCoin"
         log.info("Invio ordine: %s", params)
         res = self.session.place_order(**params)
+        return res["result"]
+
+    def cancel_protective_orders(self, symbol: str) -> None:
+        """Spot: cancella gli ordini TP/SL ancora attivi sul simbolo."""
+        self.session.cancel_all_orders(category=self.category, symbol=symbol, orderFilter="tpslOrder")
+
+    def sell_market(self, symbol: str, qty: Decimal) -> dict[str, Any]:
+        """Spot: vende `qty` monete base a mercato."""
+        res = self.session.place_order(
+            category=self.category, symbol=symbol, side="Sell", orderType="Market",
+            qty=str(qty), marketUnit="baseCoin",
+        )
         return res["result"]
 
 

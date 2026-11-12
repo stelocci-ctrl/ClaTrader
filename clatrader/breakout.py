@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import Sequence
 
 from .indicators import atr, sma
-from .strategy import Candle
+from .strategy import Candle, Signal
 
 
 @dataclass(frozen=True)
@@ -97,6 +97,28 @@ class BreakoutResult:
             cur = cur + 1 if t.r_net <= 0 else 0
             worst = max(worst, cur)
         return worst
+
+    def compounded(self, risk_pct: float, max_leverage: float = 1.0) -> tuple[float, float]:
+        """Rendimento composto e drawdown massimo (in %) rischiando `risk_pct`% del capitale.
+
+        La posizione vale risk_pct / distanza_stop% del capitale, ma al massimo
+        `max_leverage` volte il capitale (1 = spot senza leva).
+        """
+        equity = peak = 1.0
+        max_dd = 0.0
+        for t in self.closed:
+            stop_frac = (t.entry - t.stop) / t.entry
+            size = min(risk_pct / 100 / stop_frac, max_leverage)
+            unit_return = t.r_net * stop_frac  # rendimento netto per unità investita
+            equity *= max(0.0, 1 + size * unit_return)
+            peak = max(peak, equity)
+            max_dd = max(max_dd, 1 - equity / peak)
+        return (equity - 1) * 100, max_dd * 100
+
+    @property
+    def avg_stop_pct(self) -> float:
+        c = self.closed
+        return sum((t.entry - t.stop) / t.entry for t in c) / len(c) * 100 if c else 0.0
 
     @property
     def best_r(self) -> float:
@@ -204,3 +226,47 @@ GRID = [
     for x in (10, 20)
     for s in (2.0, 3.0)
 ]
+
+
+
+@dataclass
+class BreakoutAnalysis:
+    ready: bool = False
+    price: float = 0.0
+    channel_high: float = 0.0  # massimo delle `entry_period` candele precedenti
+    channel_low: float = 0.0   # minimo delle `exit_period` candele precedenti
+    atr: float = 0.0
+    exit: bool = False         # chiusura sotto il minimo di uscita
+    signal: Signal | None = None
+
+
+def analyze(symbol: str, candles: Sequence[Candle], p: BreakoutParams) -> BreakoutAnalysis:
+    """Analizza l'ultima candela chiusa: segnale di entrata e/o di uscita."""
+    if len(candles) < p.warmup + 1:
+        return BreakoutAnalysis()
+    closes = [c.close for c in candles]
+    a = atr([c.high for c in candles], [c.low for c in candles], closes, p.atr_period)[-1]
+    last = candles[-1]
+    res = BreakoutAnalysis(
+        ready=a is not None,
+        price=last.close,
+        channel_high=max(c.high for c in candles[-1 - p.entry_period:-1]),
+        channel_low=min(c.low for c in candles[-1 - p.exit_period:-1]),
+        atr=a or 0.0,
+        exit=exit_signal(candles, p),
+    )
+    if res.ready and res.atr > 0 and entry_signal(candles, p):
+        res.signal = Signal(
+            symbol=symbol,
+            side="Buy",
+            entry=last.close,
+            stop_loss=last.close - p.stop_atr * res.atr,
+            take_profit=None,
+            candle_start_ms=last.start_ms,
+            reason=(
+                f"Breakout: chiusura {last.close:g} sopra il massimo a {p.entry_period} giorni "
+                f"({res.channel_high:g}). Uscita automatica sotto il minimo a {p.exit_period} giorni."
+            ),
+            indicators={"atr": res.atr},
+        )
+    return res

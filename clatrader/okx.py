@@ -125,11 +125,13 @@ class OkxClient:
     def order_params(self, signal: Signal) -> dict[str, Any]:
         """Parametri ccxt: quantità in moneta base e TP/SL agganciati (attachAlgoOrds)."""
         tick = self.get_rules(signal.symbol).tick_size
-        return {
+        params: dict[str, Any] = {
             "tgtCcy": "base_ccy",
-            "takeProfit": {"triggerPrice": float(round_to_tick(signal.take_profit, tick)), "type": "market"},
             "stopLoss": {"triggerPrice": float(round_to_tick(signal.stop_loss, tick)), "type": "market"},
         }
+        if signal.take_profit is not None:
+            params["takeProfit"] = {"triggerPrice": float(round_to_tick(signal.take_profit, tick)), "type": "market"}
+        return params
 
     def place_market_order(self, signal: Signal, qty: Decimal) -> dict[str, Any]:
         """Ordine a mercato con stop loss e take profit agganciati."""
@@ -139,4 +141,19 @@ class OkxClient:
         params = self.order_params(signal)
         log.info("Invio ordine OKX: %s buy %s %s", m["symbol"], qty, params)
         order = self.ex.create_order(m["symbol"], "market", "buy", float(qty), None, params)
+        return {"orderId": order.get("id")}
+
+    def cancel_protective_orders(self, symbol: str) -> int:
+        """Cancella gli ordini stop/target (algo) ancora attivi sul simbolo. Ritorna quanti."""
+        sym = self._market(symbol)["symbol"]
+        cancelled = 0
+        for ord_type in ("conditional", "oco"):
+            for order in self.ex.fetch_open_orders(sym, params={"ordType": ord_type}):
+                self.ex.cancel_order(order["id"], sym, params={"trigger": True})
+                cancelled += 1
+        return cancelled
+
+    def sell_market(self, symbol: str, qty: Decimal) -> dict[str, Any]:
+        """Vende `qty` monete base a mercato."""
+        order = self.ex.create_order(self._market(symbol)["symbol"], "market", "sell", float(qty))
         return {"orderId": order.get("id")}

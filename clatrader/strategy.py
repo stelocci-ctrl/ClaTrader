@@ -40,7 +40,7 @@ class Signal:
     side: Side
     entry: float
     stop_loss: float
-    take_profit: float
+    take_profit: float | None  # None = nessun target fisso (es. trend following)
     candle_start_ms: int
     reason: str
     indicators: dict[str, float] = field(default_factory=dict)

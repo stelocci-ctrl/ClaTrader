@@ -113,14 +113,20 @@ VOLUME_MULT=0 python -m clatrader.backtest          # confronto senza filtro vol
 python -m clatrader.backtest -c spot                # solo long, fee spot
 ```
 
-### Trend following giornaliero (breakout, solo backtest per ora)
+### Trend following giornaliero (breakout)
 ```bash
 python -m clatrader.backtest -s breakout                       # candele giornaliere, ~2000 giorni
 python -m clatrader.backtest -s breakout -r global BTCUSDT ETHUSDT   # storico più lungo (coppie USDT)
 ```
 Entra quando la chiusura supera il massimo degli ultimi 20 giorni (all'apertura del giorno dopo),
 stop iniziale a 2×ATR, esce quando la chiusura scende sotto il minimo degli ultimi 10 giorni.
-Mostra risultato prima/dopo i costi (commissioni + slippage), drawdown, confronto con buy & hold
+Nel bot si attiva con `STRATEGY=breakout`: ogni giorno, dopo la chiusura della candela giornaliera
+(00:00 UTC, cioè l'1 o le 2 di notte in Italia), se c'è un breakout ricevi la richiesta di autorizzazione
+(valida 12 ore). L'ordine parte con il solo **stop loss** agganciato; l'**uscita è automatica** quando la
+chiusura scende sotto il minimo di `BREAKOUT_EXIT_DAYS` giorni (il bot cancella lo stop e vende ciò che
+aveva comprato). La quantità viene ricalcolata al momento dell'esecuzione sul prezzo attuale.
+
+Il backtest mostra risultato prima/dopo i costi (commissioni + slippage), drawdown, confronto con buy & hold
 e una **prova di robustezza** su 12 combinazioni di parametri: una strategia credibile è positiva
 nella gran parte delle combinazioni e su più monete, non in una sola.
 

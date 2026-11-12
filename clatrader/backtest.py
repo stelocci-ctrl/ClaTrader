@@ -129,7 +129,13 @@ def report_breakout(symbol: str, candles: list[Candle], fee: float, slippage: fl
           f"totale {base.total_r:+.1f} R (prima dei costi {base.total_r_gross:+.1f} R)")
     print(f"  drawdown max {base.max_drawdown_r:.1f} R · peggior serie {base.max_losing_streak} perdite · "
           f"miglior operazione {base.best_r:+.1f} R")
-    print(f"  ≈ {base.total_r:+.0f}% con rischio 1% per operazione  vs  buy & hold {base.buy_hold_pct:+.0f}%")
+    print(f"  buy & hold nello stesso periodo: {base.buy_hold_pct:+.0f}% · stop medio {base.avg_stop_pct:.1f}% sotto l'entrata")
+    risk = float(os.getenv("RISK_PER_TRADE_PCT", "1.0"))
+    for rk in sorted({1.0, risk}):
+        for lev in (1.0, 5.0):
+            ret, dd = base.compounded(rk, lev)
+            print(f"  rischio {rk:g}% · {'senza leva' if lev == 1 else f'leva max {lev:g}x'}: "
+                  f"rendimento {ret:+.0f}% · drawdown max -{dd:.0f}%")
     if base.trades and base.trades[-1].reason == "aperta":
         print(f"  (operazione ancora aperta: {base.trades[-1].r_net:+.1f} R, non conteggiata)")
     if base.n < 30:

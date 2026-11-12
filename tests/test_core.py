@@ -282,9 +282,18 @@ class _FakeClient:
         return None
 
     def place_market_order(self, signal, qty):
-        self.orders.append((signal.symbol, qty))
-        self.balances["BTC"] += float(qty)
+        self.orders.append((signal.symbol, qty, signal.take_profit))
+        # la commissione (0,1%) viene trattenuta in BTC, come su OKX
+        self.balances["BTC"] += float(qty) * 0.999
         return {"orderId": "X1"}
+
+    def cancel_protective_orders(self, symbol):
+        self.cancelled = getattr(self, "cancelled", 0) + 1
+
+    def sell_market(self, symbol, qty):
+        self.sold = getattr(self, "sold", []) + [qty]
+        self.balances["BTC"] -= float(qty)
+        return {"orderId": "S1"}
 
     def get_closed_candles(self, *a):
         return self.candles
@@ -699,3 +708,179 @@ def test_backtest_breakout_cli(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert seen == {"interval": "D", "n": 2000}
     assert "buy & hold" in out and "Robustezza" in out and "su 12 combinazioni" in out
+
+
+def test_breakout_compounding_and_leverage_cap():
+    from clatrader.breakout import BreakoutResult, Trade
+
+    # stop all'8%: rischiando il 5% la posizione vale 62,5% del capitale, la leva non serve
+    win = Trade(0, 1, 100.0, 116.0, 92.0, 2.0, 2.0, "uscita")   # +2 R = +16%
+    loss = Trade(2, 3, 100.0, 92.0, 92.0, -1.0, -1.0, "stop")    # -1 R = -8%
+    r = BreakoutResult(trades=[win, loss])
+    ret, dd = r.compounded(5.0, 1.0)
+    assert abs(ret - ((1 + 0.625 * 0.16) * (1 - 0.625 * 0.08) - 1) * 100) < 1e-9
+    assert abs(dd - 5.0) < 1e-9
+    assert r.compounded(5.0, 5.0) == r.compounded(5.0, 1.0)  # leva inutile se lo stop è largo
+
+    # stop all'2%: senza leva la posizione è limitata al 100% del capitale
+    tight = Trade(0, 1, 100.0, 104.0, 98.0, 2.0, 2.0, "uscita")
+    r2 = BreakoutResult(trades=[tight])
+    assert abs(r2.compounded(5.0, 1.0)[0] - 4.0) < 1e-9      # 100% x +4%
+    assert abs(r2.compounded(5.0, 5.0)[0] - 10.0) < 1e-9     # 250% x +4% con la leva
+
+
+
+def _breakout_bot(prices):
+    from clatrader.breakout import BreakoutParams
+
+    bot = _test_bot()
+    bot.strategy_name = "breakout"
+    bot.breakout = BreakoutParams(entry_period=10, exit_period=5, atr_period=5, stop_atr=2.0)
+    bot.cfg.interval = "D"
+    bot.cfg.risk_per_trade_pct = 5.0
+    bot.cfg.max_position_usdt = 1_000_000.0
+    bot.client = _FakeClient(_daily(prices))
+    return bot
+
+
+def test_breakout_live_analysis_signal_without_target():
+    from clatrader.breakout import BreakoutParams, analyze as analyze_bo
+
+    prices = [100.0] * 30 + [101.0, 102.0, 110.0]
+    a = analyze_bo("BTCUSDC", _daily(prices), BreakoutParams(entry_period=10, exit_period=5, atr_period=5))
+    assert a.signal is not None and a.signal.take_profit is None
+    assert a.signal.stop_loss < a.signal.entry == 110.0
+    assert not a.exit
+
+
+def test_breakout_bot_entry_then_automatic_exit():
+    import asyncio
+
+    bot = _breakout_bot([100.0] * 30 + [101.0, 102.0, 110.0])
+    bot.cfg.dry_run = False
+    asyncio.run(bot._scan_symbol(None, "BTCUSDC"))
+    assert len(bot.pending) == 1
+    msg = bot.telegram[-1]
+    assert "uscita automatica" in msg and "Target" not in msg
+    trade = next(iter(bot.pending.values()))
+    # rischio 5%: posizione = 5% del saldo / distanza dello stop, sotto il 100% del saldo
+    risk = float(trade.qty) * trade.signal.stop_distance
+    assert abs(risk / 10_000 - 0.05) < 0.001
+
+    bot.client.get_last_price = lambda s: 110.0
+    assert "Ordine inviato" in asyncio.run(bot._execute(trade))
+    assert bot.client.orders[-1][2] is None  # nessun take profit inviato
+    assert bot.book.get("BTCUSDC")["take_profit"] is None
+
+    # nessuna uscita finché il prezzo tiene
+    asyncio.run(bot._check_exits(None))
+    assert bot.book.get("BTCUSDC") is not None and not getattr(bot.client, "sold", [])
+
+    # la chiusura scende sotto il minimo a 5 giorni -> uscita automatica
+    bot.client.candles = _daily([100.0] * 30 + [101.0, 102.0, 110.0, 111.0, 112.0, 95.0])
+    bot.client.get_last_price = lambda s: 95.0
+    asyncio.run(bot._check_exits(None))
+    assert bot.client.cancelled == 1  # stop loss cancellato prima di vendere
+    sold = bot.client.sold[0]
+    # vende solo ciò che ha comprato il bot, al netto della commissione in BTC
+    assert sold <= trade.qty * Decimal("0.999") and sold > 0
+    assert abs(bot.client.balances["BTC"] - 1.0) < 0.002  # i BTC che avevi già restano
+    assert bot.book.get("BTCUSDC") is None
+    assert "Uscita automatica BTCUSDC" in bot.telegram[-1] and "R" in bot.telegram[-1]
+
+
+def test_breakout_exit_failure_is_reported_once_per_candle():
+    import asyncio
+
+    bot = _breakout_bot([100.0] * 30 + [101.0, 102.0, 110.0, 111.0, 112.0, 95.0])
+    bot.cfg.dry_run = False
+    bot.book.open("BTCUSDC", 0.5, 1.0, 110.0, 100.0, None)
+    bot.client.balances["BTC"] = 1.5
+
+    def boom(symbol, qty):
+        raise RuntimeError("exchange non raggiungibile")
+
+    bot.client.sell_market = boom
+    asyncio.run(bot._check_exits(None))
+    assert "NON riuscita" in bot.telegram[-1]
+    n = len(bot.telegram)
+    asyncio.run(bot._check_exits(None))  # stessa candela: nessun nuovo tentativo né messaggio
+    assert len(bot.telegram) == n
+
+
+def test_okx_breakout_order_has_only_stop_loss():
+    from clatrader.strategy import Signal
+
+    client = _okx_client()
+    sent = {}
+
+    def fake_order(request, params=None):
+        sent.update(request[0] if isinstance(request, list) else request)
+        return {"code": "0", "data": [{"ordId": "9", "sCode": "0", "sMsg": ""}]}
+
+    client.ex.privatePostTradeBatchOrders = fake_order
+    client.ex.privatePostTradeOrder = fake_order
+    client.place_market_order(Signal("BTCUSDC", "Buy", 73000.0, 69000.0, None, 0, "bo"), Decimal("0.01"))
+    algo = sent["attachAlgoOrds"][0]
+    assert algo["slTriggerPx"] == "69000" and "tpTriggerPx" not in algo
+
+
+def test_okx_cancel_protective_orders():
+    client = _okx_client()
+    calls = []
+    client.ex.fetch_open_orders = lambda sym, params=None: (
+        calls.append(("fetch", sym, params["ordType"])) or ([{"id": "a1"}] if params["ordType"] == "conditional" else [])
+    )
+    client.ex.cancel_order = lambda oid, sym, params=None: calls.append(("cancel", oid, params))
+    assert client.cancel_protective_orders("BTCUSDC") == 1
+    assert ("cancel", "a1", {"trigger": True}) in calls
+    assert ("fetch", "BTC/USDC", "oco") in calls
+
+
+def test_config_breakout(monkeypatch):
+    import pytest
+
+    from clatrader.config import Config
+
+    for k, v in {"EXCHANGE": "okx", "REGION": "eu", "OKX_API_KEY": "k", "OKX_API_SECRET": "s",
+                 "OKX_API_PASSPHRASE": "p", "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1",
+                 "STRATEGY": "breakout", "INTERVAL": "15", "BREAKOUT_ENTRY_DAYS": "55"}.items():
+        monkeypatch.setenv(k, v)
+    cfg = Config.from_env()
+    assert cfg.strategy_name == "breakout" and cfg.interval == "D" and cfg.breakout.entry_period == 55
+
+    monkeypatch.setenv("EXCHANGE", "bybit")
+    monkeypatch.setenv("BYBIT_API_KEY", "k")
+    monkeypatch.setenv("BYBIT_API_SECRET", "s")
+    monkeypatch.setenv("CATEGORY", "linear")
+    with pytest.raises(RuntimeError, match="spot"):
+        Config.from_env()
+
+
+def test_execute_resizes_on_current_price():
+    """Se il prezzo sale prima dell'autorizzazione, la quantità scende: il rischio resta il 5%."""
+    import asyncio
+
+    bot = _breakout_bot([100.0] * 30 + [101.0, 102.0, 110.0])
+    bot.cfg.dry_run = False
+    bot.cfg.max_price_deviation_pct = 3.0
+    asyncio.run(bot._scan_symbol(None, "BTCUSDC"))
+    trade = next(iter(bot.pending.values()))
+    qty_signal = trade.qty
+    bot.client.get_last_price = lambda s: 112.0  # +1,8% prima del clic
+    assert "Ordine inviato" in asyncio.run(bot._execute(trade))
+    assert trade.qty < qty_signal
+    risk = float(trade.qty) * (112.0 - trade.signal.stop_loss)
+    assert abs(risk / 10_000 - 0.05) < 0.001
+
+
+def test_config_breakout_longer_approval(monkeypatch):
+    from clatrader.config import Config
+
+    for k, v in {"EXCHANGE": "okx", "OKX_API_KEY": "k", "OKX_API_SECRET": "s", "OKX_API_PASSPHRASE": "p",
+                 "TELEGRAM_BOT_TOKEN": "t", "TELEGRAM_CHAT_ID": "1", "STRATEGY": "breakout"}.items():
+        monkeypatch.setenv(k, v)
+    monkeypatch.delenv("APPROVAL_TIMEOUT_SEC", raising=False)
+    monkeypatch.delenv("MAX_PRICE_DEVIATION_PCT", raising=False)
+    cfg = Config.from_env()
+    assert cfg.approval_timeout_sec == 43200 and cfg.max_price_deviation_pct == 3.0
