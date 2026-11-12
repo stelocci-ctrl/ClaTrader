@@ -269,6 +269,22 @@ def test_analysis_explains_missing_conditions():
 class _FakeClient:
     def __init__(self, candles):
         self.candles = candles
+        self.balances = {"BTC": 1.0, "USDC": 10_000.0}  # il demo parte già con BTC
+        self.orders = []
+
+    def base_currency(self, symbol):
+        return "BTC"
+
+    def get_coin_balance(self, coin):
+        return self.balances.get(coin, 0.0)
+
+    def ensure_leverage(self, *a):
+        return None
+
+    def place_market_order(self, signal, qty):
+        self.orders.append((signal.symbol, qty))
+        self.balances["BTC"] += float(qty)
+        return {"orderId": "X1"}
 
     def get_closed_candles(self, *a):
         return self.candles
@@ -314,6 +330,13 @@ def _test_bot(testnet=True, category="spot"):
     bot.params = PARAMS
     bot.client = _FakeClient(_series([100.0 + i for i in range(60)]))
     bot.pending, bot.last_signal_candle, bot.paused = {}, {}, False
+    import tempfile
+    from pathlib import Path
+
+    from clatrader.positions import SpotPositionBook
+
+    bot.book = SpotPositionBook(Path(tempfile.mkdtemp()) / "positions.json")
+    bot.cfg.max_price_deviation_pct = 0.5
     bot.telegram = []
 
     async def send(app, text, **kw):
@@ -531,3 +554,61 @@ def test_backtest_fetch_okx_keeps_closed_sorted_unique(monkeypatch):
     monkeypatch.setattr(okx, "OkxClient", fake_client)
     candles = bt.fetch_okx("BTCUSDC", "1", 3)
     assert [c.start_ms // 60_000 for c in candles] == [2, 3, 4]
+
+
+
+def test_spot_existing_coins_are_not_a_bot_position():
+    """Le monete già nel conto (es. BTC regalati dal demo) non bloccano i segnali."""
+    import asyncio
+    from types import SimpleNamespace
+
+    sent = []
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=_Msg(sent))
+    bot = _test_bot()
+    assert bot.client.balances["BTC"] == 1.0
+    asyncio.run(bot.cmd_test(update, _ctx()))
+    assert len(bot.pending) == 1
+    assert not any("posizione già aperta" in t for t in bot.telegram)
+
+
+def test_spot_position_lifecycle_open_and_close():
+    import asyncio
+
+    from clatrader.positions import SpotPositionBook
+
+    bot = _test_bot()
+    bot.cfg.dry_run = False
+    asyncio.run(bot.cmd_test(_update_with([]), _ctx()))
+    trade = next(iter(bot.pending.values()))
+
+    result = asyncio.run(bot._execute(trade))
+    assert "Ordine inviato" in result and bot.client.orders
+    rec = bot.book.get("BTCUSDC")
+    assert rec["base_before"] == 1.0 and rec["qty"] == float(trade.qty)
+    assert asyncio.run(bot._has_position("BTCUSDC"))
+    assert SpotPositionBook(bot.book.path).get("BTCUSDC") is not None  # salvato su file
+
+    # un secondo ordine sullo stesso simbolo viene bloccato
+    assert "già una posizione" in asyncio.run(bot._execute(trade))
+
+    # lo stop/target vende i BTC comprati: il bot se ne accorge e avvisa
+    bot.client.balances["BTC"] = 1.0
+    asyncio.run(bot._check_closed_positions(None))
+    assert bot.book.get("BTCUSDC") is None
+    assert "Posizione <b>BTCUSDC</b> chiusa" in bot.telegram[-1]
+
+
+def test_dry_run_does_not_record_position():
+    import asyncio
+
+    bot = _test_bot()
+    asyncio.run(bot.cmd_test(_update_with([]), _ctx()))
+    trade = next(iter(bot.pending.values()))
+    assert "DRY-RUN" in asyncio.run(bot._execute(trade))
+    assert bot.book.get("BTCUSDC") is None and not bot.client.orders
+
+
+def _update_with(sent):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=_Msg(sent))

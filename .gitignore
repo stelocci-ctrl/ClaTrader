@@ -3,3 +3,5 @@ __pycache__/
 *.pyc
 .venv/
 .pytest_cache/
+clatrader_positions.json
+clatrader_positions.json.tmp

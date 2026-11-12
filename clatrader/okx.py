@@ -91,6 +91,9 @@ class OkxClient:
             min_notional=Decimal(str(cost_min or 0)),
         )
 
+    def base_currency(self, symbol: str) -> str:
+        return self._market(symbol)["base"]
+
     def quote_currency(self, symbol: str) -> str:
         return self._market(symbol)["quote"]
 

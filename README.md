@@ -153,6 +153,9 @@ I test girano automaticamente su GitHub Actions (Python 3.11–3.13) a ogni pull
 push su `main`. In locale: `pip install -r requirements-dev.txt && python -m pytest`.
 
 ## Note
+- **Spot**: il bot tiene traccia solo delle posizioni che apre lui, nel file `clatrader_positions.json`
+  (cartella del progetto). Le monete che possiedi già non bloccano i segnali. Quando stop loss o
+  take profit vendono, ricevi un avviso 🔔 su Telegram. Non cancellare quel file con posizioni aperte.
 - I segnali in attesa sono in memoria: se riavvii il bot, quelli non autorizzati si perdono
   (le posizioni aperte restano sull'exchange con i loro SL/TP).
 - Tieni il bot sempre acceso (VPS, Raspberry Pi, `systemd`, `tmux`…) per ricevere i segnali.

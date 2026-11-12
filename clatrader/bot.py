@@ -4,11 +4,13 @@ from __future__ import annotations
 import asyncio
 import html
 import logging
+import os
 import secrets
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
+from pathlib import Path
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
@@ -22,6 +24,7 @@ from telegram.ext import (
 
 from .config import Config
 from .exchange import make_client
+from .positions import SpotPositionBook
 from .risk import position_size
 from .strategy import Analysis, Signal, analyze, describe
 
@@ -42,6 +45,7 @@ class ClaTrader:
     def __init__(self, cfg: Config):
         self.cfg = cfg
         self.client = make_client(cfg)
+        self.book = SpotPositionBook(Path(os.getenv("STATE_FILE", "clatrader_positions.json")))
         self.params = cfg.strategy
         self.pending: dict[str, PendingTrade] = {}
         self.last_signal_candle: dict[str, int] = {}
@@ -70,8 +74,47 @@ class ClaTrader:
         return f"{net}{' · DRY-RUN' if self.cfg.dry_run else ''}"
 
     # ------------------------------------------------------------ ciclo strategia
+    # ------------------------------------------------------------ posizioni
+    async def _has_position(self, symbol: str) -> bool:
+        """Spot: solo le posizioni aperte dal bot (non le monete che possiedi già)."""
+        if self.cfg.category != "spot":
+            return await asyncio.to_thread(self.client.has_open_position, symbol)
+        rec = self.book.get(symbol)
+        if rec is None:
+            return False
+        base = await asyncio.to_thread(self.client.base_currency, symbol)
+        balance = await asyncio.to_thread(self.client.get_coin_balance, base)
+        return self.book.is_still_open(rec, balance)
+
+    async def _check_closed_positions(self, app: Application) -> None:
+        """Avvisa quando una posizione spot del bot si chiude (stop, target o vendita manuale)."""
+        for symbol in self.book.symbols():
+            try:
+                if await self._has_position(symbol):
+                    continue
+                price = await asyncio.to_thread(self.client.get_last_price, symbol)
+            except Exception:  # noqa: BLE001 - riproveremo al prossimo giro
+                log.exception("Controllo posizione %s fallito", symbol)
+                continue
+            rec = self.book.close(symbol)
+            if rec is None:
+                continue
+            change = (price - rec["entry"]) / rec["entry"] * 100
+            if price <= rec["stop_loss"] * 1.002:
+                how = "🔴 probabilmente è scattato lo <b>stop loss</b>"
+            elif price >= rec["take_profit"] * 0.998:
+                how = "🟢 probabilmente è stato raggiunto il <b>take profit</b>"
+            else:
+                how = "chiusa (stop, target o vendita manuale)"
+            await self._send(
+                app,
+                f"🔔 Posizione <b>{symbol}</b> chiusa: {how}.\n"
+                f"Ingresso {rec['entry']:g} · prezzo attuale {price:g} ({change:+.2f}%)",
+            )
+
     async def scan(self, context: ContextTypes.DEFAULT_TYPE) -> None:
         self._expire_pending(context.application)
+        await self._check_closed_positions(context.application)
         if self.paused:
             return
         for symbol in self.cfg.symbols:
@@ -109,7 +152,7 @@ class ClaTrader:
         if any(p.signal.symbol == symbol and not p.done for p in self.pending.values()):
             await self._send(app, f"ℹ️ Segnale su {symbol} ignorato: ce n'è già uno in attesa di risposta.")
             return
-        if await asyncio.to_thread(self.client.has_open_position, symbol):
+        if await self._has_position(symbol):
             log.info("Posizione già aperta su %s, segnale ignorato", symbol)
             await self._send(app, f"ℹ️ Segnale su {symbol} ignorato: posizione già aperta.")
             return
@@ -229,13 +272,19 @@ class ClaTrader:
                 s.side == "Sell" and not s.take_profit < price < s.stop_loss
             ):
                 return f"🚫 <b>Annullato</b>: il prezzo attuale {price:g} è fuori dall'intervallo SL/TP."
-            if await asyncio.to_thread(self.client.has_open_position, s.symbol):
+            if await self._has_position(s.symbol):
                 return "🚫 <b>Annullato</b>: esiste già una posizione aperta."
             if self.cfg.dry_run:
                 log.info("DRY-RUN: ordine %s %s qty=%s non inviato", s.side, s.symbol, trade.qty)
                 return f"🧪 <b>Autorizzato (DRY-RUN)</b>: nessun ordine reale inviato. Prezzo attuale {price:g}."
             await asyncio.to_thread(self.client.ensure_leverage, s.symbol, self.cfg.leverage)
+            base_before = 0.0
+            if self.cfg.category == "spot":
+                base = await asyncio.to_thread(self.client.base_currency, s.symbol)
+                base_before = await asyncio.to_thread(self.client.get_coin_balance, base)
             res = await asyncio.to_thread(self.client.place_market_order, s, trade.qty)
+            if self.cfg.category == "spot":
+                self.book.open(s.symbol, float(trade.qty), base_before, s.entry, s.stop_loss, s.take_profit)
             return f"✅ <b>Ordine inviato</b> · ID <code>{html.escape(str(res.get('orderId')))}</code>"
         except Exception as e:  # noqa: BLE001
             log.exception("Esecuzione fallita")
@@ -277,6 +326,22 @@ class ClaTrader:
 
     async def cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._authorized(update):
+            return
+        if self.cfg.category == "spot":
+            lines = []
+            for sym in self.cfg.symbols:
+                rec = self.book.get(sym)
+                if rec is None or not await self._has_position(sym):
+                    continue
+                price = await asyncio.to_thread(self.client.get_last_price, sym)
+                change = (price - rec["entry"]) / rec["entry"] * 100
+                lines.append(
+                    f"{sym} LONG {rec['qty']:g} @ {rec['entry']:g} · SL {rec['stop_loss']:.6g} · "
+                    f"TP {rec['take_profit']:.6g} · ora {price:g} ({change:+.2f}%)"
+                )
+            await update.effective_message.reply_text(
+                "\n".join(lines) if lines else "Nessuna posizione aperta dal bot."
+            )
             return
         pos = []
         for sym in self.cfg.symbols:

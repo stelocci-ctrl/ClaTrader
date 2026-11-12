@@ -72,6 +72,10 @@ class BybitClient:
         self._quote_coin[symbol] = info.get("quoteCoin") or info.get("settleCoin") or "USDT"
         return rules
 
+    def base_currency(self, symbol: str) -> str:
+        self.get_rules(symbol)
+        return self._base_coin[symbol]
+
     def quote_currency(self, symbol: str) -> str:
         """Valuta in cui sono espressi prezzi, saldo e rischio (USDT, USDC, EUR...)."""
         self.get_rules(symbol)
