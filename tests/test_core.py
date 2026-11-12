@@ -146,3 +146,31 @@ def test_backtest_main_reads_env(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "filtro volume off" in out and "trend EMA 50" in out and "solo long" in out
     assert "AAAUSDT:" in out and "BBBUSDT:" in out
+
+
+def test_start_message_is_valid_telegram_html():
+    """Telegram rifiuta i messaggi HTML con '<' o '>' fuori dai tag (es. 'long < 70')."""
+    import asyncio
+    import re
+    from types import SimpleNamespace
+
+    from clatrader.bot import ClaTrader
+
+    sent = []
+
+    class Msg:
+        async def reply_html(self, text):
+            sent.append(text)
+
+    bot = object.__new__(ClaTrader)
+    bot.cfg = SimpleNamespace(
+        telegram_chat_id=1, symbols=("BTCUSDT",), interval="15", category="linear",
+        risk_per_trade_pct=1.0, bybit_testnet=True, dry_run=True,
+    )
+    bot.params = StrategyParams()
+    update = SimpleNamespace(effective_chat=SimpleNamespace(id=1), effective_message=Msg())
+    asyncio.run(bot.cmd_start(update, None))
+
+    assert sent, "/start non ha risposto"
+    without_tags = re.sub(r"</?(b|i|code)>", "", sent[0])
+    assert "<" not in without_tags and ">" not in without_tags

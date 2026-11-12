@@ -230,7 +230,7 @@ class ClaTrader:
         await update.effective_message.reply_html(
             f"🤖 <b>ClaTrader</b> attivo [{self._mode_label()}]\n"
             f"Simboli: {', '.join(self.cfg.symbols)} · TF {self.cfg.interval} · {self.cfg.category}\n"
-            f"Strategia: {describe(self.params)}\n"
+            f"Strategia: {html.escape(describe(self.params))}\n"
             f"Rischio per trade: {self.cfg.risk_per_trade_pct}%\n\n"
             "/status /balance /positions /pause /resume /scan"
         )
@@ -286,6 +286,17 @@ class ClaTrader:
             await asyncio.to_thread(self.client.get_rules, sym)
         await self._send(app, f"🤖 ClaTrader avviato [{self._mode_label()}] — /start per i dettagli.")
 
+    async def on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Registra l'errore e lo notifica su Telegram, così un comando non resta mai senza risposta."""
+        log.error("Errore non gestito", exc_info=context.error)
+        try:
+            await self._send(
+                context.application,
+                f"⚠️ Errore: <code>{html.escape(str(context.error))[:500]}</code>",
+            )
+        except Exception:  # noqa: BLE001 - se anche Telegram fallisce, resta il log
+            log.exception("Impossibile notificare l'errore su Telegram")
+
     # ------------------------------------------------------------ avvio
     def run(self) -> None:
         app = Application.builder().token(self.cfg.telegram_token).post_init(self.on_startup).build()
@@ -301,6 +312,7 @@ class ClaTrader:
         }.items():
             app.add_handler(CommandHandler(name, fn, filters=only_me))
         app.add_handler(CallbackQueryHandler(self.on_callback, pattern=r"^(ok|no):"))
+        app.add_error_handler(self.on_error)
         app.job_queue.run_repeating(self.scan, interval=self.cfg.poll_interval_sec, first=5)
         log.info("ClaTrader avviato [%s]", self._mode_label())
         app.run_polling(allowed_updates=Update.ALL_TYPES)
