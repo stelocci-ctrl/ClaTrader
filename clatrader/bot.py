@@ -169,7 +169,11 @@ class ClaTrader:
                 if last is None or not a.exit or rec.get("exit_attempt_ms") == last:
                     continue
                 self.book.update(symbol, exit_attempt_ms=last)  # un solo tentativo per candela
-                await self._auto_exit(app, symbol, rec, a)
+                why = (
+                    f"chiusura {a.price:g} sotto il minimo a {self.breakout.exit_period} giorni "
+                    f"({a.channel_low:g})"
+                )
+                await self._close_position(app, symbol, rec, "Uscita automatica", why)
             except Exception as e:  # noqa: BLE001
                 log.exception("Uscita automatica %s fallita", symbol)
                 await self._send(
@@ -178,14 +182,15 @@ class ClaTrader:
                     "Controlla la posizione su exchange e, se serve, vendi a mano.",
                 )
 
-    async def _auto_exit(self, app: Application, symbol: str, rec: dict, a) -> None:
+    async def _close_position(self, app: Application, symbol: str, rec: dict, title: str, why: str) -> None:
+        """Cancella lo stop agganciato e vende a mercato ciò che ha comprato il bot."""
         base = await asyncio.to_thread(self.client.base_currency, symbol)
         balance = await asyncio.to_thread(self.client.get_coin_balance, base)
         rules = await asyncio.to_thread(self.client.get_rules, symbol)
         # vendiamo solo ciò che ha comprato il bot (al netto della commissione presa in moneta base)
         qty = round_down_to_step(min(rec["qty"], balance - rec["base_before"]), rules.qty_step)
         if self.cfg.dry_run:
-            await self._send(app, f"🧪 DRY-RUN: segnale di uscita su {symbol}, nessun ordine inviato.")
+            await self._send(app, f"🧪 DRY-RUN: {title.lower()} su {symbol} ({why}), nessun ordine inviato.")
             return
         warn = ""
         try:
@@ -205,8 +210,7 @@ class ClaTrader:
         change = (price - rec["entry"]) / rec["entry"] * 100
         await self._send(
             app,
-            f"🏁 <b>Uscita automatica {symbol}</b>: chiusura {a.price:g} sotto il minimo a "
-            f"{self.breakout.exit_period} giorni ({a.channel_low:g}).\n"
+            f"🏁 <b>{title} {symbol}</b>: {html.escape(why)}.\n"
             f"Venduti {qty} a circa {price:g} · ingresso {rec['entry']:g} · "
             f"risultato <b>{r:+.2f} R</b> ({change:+.2f}%){warn}",
         )
@@ -412,7 +416,7 @@ class ClaTrader:
             f"Simboli: {', '.join(self.cfg.symbols)} · TF {self.cfg.interval} · {self.cfg.category}\n"
             f"Strategia: {html.escape(self._describe_strategy())}\n"
             f"Rischio per trade: {self.cfg.risk_per_trade_pct}%\n\n"
-            "/status /balance /positions /pause /resume /scan /test"
+            "/status /balance /positions /close /pause /resume /scan /test"
         )
 
     async def cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -530,6 +534,32 @@ class ClaTrader:
         self.last_signal_candle.clear()
         await self.scan(context)
 
+    async def cmd_close(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Chiude subito una posizione spot del bot (o tutte): /close BTCUSDC oppure /close all."""
+        if not self._authorized(update):
+            return
+        arg = context.args[0].upper() if context.args else ""
+        open_syms = [s for s in self.book.symbols() if await self._has_position(s)]
+        targets = open_syms if arg == "ALL" else [arg] if arg else []
+        if not targets:
+            await update.effective_message.reply_text(
+                "Uso: /close SIMBOLO oppure /close all\n"
+                f"Posizioni aperte dal bot: {', '.join(open_syms) or 'nessuna'}"
+            )
+            return
+        for sym in targets:
+            rec = self.book.get(sym)
+            if rec is None or sym not in open_syms:
+                await update.effective_message.reply_text(f"Nessuna posizione aperta dal bot su {sym}.")
+                continue
+            try:
+                await self._close_position(context.application, sym, rec, "Chiusura manuale", "comando /close")
+            except Exception as e:  # noqa: BLE001
+                log.exception("Chiusura %s fallita", sym)
+                await update.effective_message.reply_html(
+                    f"⚠️ Chiusura {sym} NON riuscita: <code>{html.escape(str(e))[:300]}</code>"
+                )
+
     async def cmd_test(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Solo testnet: crea un segnale LONG di prova al prezzo attuale per provare il flusso."""
         if not self._authorized(update):
@@ -593,6 +623,7 @@ class ClaTrader:
             "resume": self.cmd_resume,
             "scan": self.cmd_scan,
             "test": self.cmd_test,
+            "close": self.cmd_close,
         }.items():
             app.add_handler(CommandHandler(name, fn, filters=only_me))
         app.add_handler(CallbackQueryHandler(self.on_callback, pattern=r"^(ok|no):"))

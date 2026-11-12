@@ -142,6 +142,7 @@ e se nella stessa candela vengono toccati sia stop sia target conta lo stop.
 | `/balance` | equity in USDT |
 | `/positions` | posizioni aperte sui simboli monitorati |
 | `/pause` / `/resume` | sospende / riprende l'analisi |
+| `/close SIMBOLO` o `/close all` | chiude subito le posizioni spot aperte dal bot (cancella lo stop e vende) |
 | `/scan` | mostra prezzo, medie, RSI e volume di ogni simbolo e **quale condizione manca** per un segnale, poi analizza |
 | `/test [SIMBOLO]` | **solo testnet**: crea un segnale LONG di prova al prezzo attuale per provare autorizzazione e ordini |
 

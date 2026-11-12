@@ -884,3 +884,20 @@ def test_config_breakout_longer_approval(monkeypatch):
     monkeypatch.delenv("MAX_PRICE_DEVIATION_PCT", raising=False)
     cfg = Config.from_env()
     assert cfg.approval_timeout_sec == 43200 and cfg.max_price_deviation_pct == 3.0
+
+
+def test_close_command_sells_bot_position():
+    import asyncio
+
+    bot = _breakout_bot([100.0] * 30 + [101.0, 102.0, 110.0])
+    bot.cfg.dry_run = False
+    bot.book.open("BTCUSDC", 0.5, 1.0, 110.0, 100.0, None)
+    bot.client.balances["BTC"] = 1.4995  # 0,5 comprati meno la commissione
+    sent = []
+    asyncio.run(bot.cmd_close(_update_with(sent), _ctx(["BTCUSDC"])))
+    assert bot.client.cancelled == 1 and bot.client.sold == [Decimal("0.499")]
+    assert bot.book.get("BTCUSDC") is None
+    assert "Chiusura manuale BTCUSDC" in bot.telegram[-1]
+
+    asyncio.run(bot.cmd_close(_update_with(sent), _ctx([])))
+    assert "nessuna" in sent[-1]
